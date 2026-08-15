@@ -1,0 +1,9 @@
+torch>=2.1
+torchvision
+diffusers>=0.27
+transformers>=4.38
+safetensors>=0.4
+Pillow
+numpy
+# optional, for --use_8bit_adam (falls back to torch.optim.AdamW if absent)
+bitsandbytes; platform_system != "Darwin"
