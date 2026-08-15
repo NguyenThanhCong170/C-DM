@@ -1,4 +1,4 @@
- """
+"""
 From-scratch diffusion math + a standalone DDIM sampling loop with
 classifier-free guidance (CFG), decoupled from any Diffusers `pipeline`
 object so it works with a raw (unet, vae, text_encoder, tokenizer) tuple —
@@ -207,13 +207,32 @@ def sample(
     eta: float = 0.0,
     generator: Optional[torch.Generator] = None,
     device: Union[str, torch.device] = "cuda",
-    dtype: torch.dtype = torch.float16,
     scheduler: Optional[NoiseScheduler] = None,
 ) -> List[Image.Image]:
     """Standalone DDIM + classifier-free-guidance sampling loop.
 
     `guidance_scale <= 1.0` disables CFG (runs conditional-only, one UNet
     call per step instead of two) — matches Diffusers' convention.
+
+    The compute dtype (for latents, text embeddings, and the U-Net forward
+    pass) is always taken from the U-Net's *own* parameter dtype — there is
+    no separate `dtype` argument to keep in sync by hand. This matters
+    because `unet` here might be:
+      - fp32, mid-training (this is how `train_custom_dreambooth.py` calls
+        `sample()` for periodic validation images, even when
+        `--mixed_precision fp16` is set — the U-Net's *weights* stay fp32
+        throughout training; only the training forward pass runs under
+        `autocast`), or
+      - fp16/bf16, for fast standalone inference after training.
+    Passing mismatched tensors (e.g. fp16 latents into an fp32 U-Net) is a
+    silent-crash footgun in plain PyTorch (`mat1 and mat2 must have the
+    same dtype`) — deriving dtype from the model itself removes that
+    failure mode entirely. To sample in fp16, cast the U-Net beforehand:
+    `unet.to(dtype=torch.float16)`. The VAE is intentionally decoded in
+    *its own* dtype independently (see `decode_latents`) regardless of the
+    U-Net's dtype, since fp16 VAE decode is a known source of all-black
+    images on Turing (T4) GPUs — keep the VAE in fp32 even if the U-Net
+    is fp16.
     """
     unet, vae, text_encoder, tokenizer = (
         components.unet,
@@ -223,6 +242,7 @@ def sample(
     )
     scheduler = scheduler or NoiseScheduler()
     do_cfg = guidance_scale > 1.0
+    dtype = next(unet.parameters()).dtype
 
     prompts = [prompt] * num_images if isinstance(prompt, str) else list(prompt)
     negatives = [negative_prompt] * len(prompts) if isinstance(negative_prompt, str) else list(negative_prompt)
