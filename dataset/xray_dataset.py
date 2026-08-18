@@ -1,19 +1,13 @@
 """
 Multi-Concept Preprocessing + PyTorch Dataset/DataLoader for DreamBooth-style fine-tuning
-on chest X-ray images (Supports single-concept and multi-concept pathologies).
-
-Features:
-  1. `percentile_normalize` & `preprocess_xray_to_rgb`: Contrast clipping + LANCZOS resize + 3-channel duplicate.
-  2. `DreamBoothXrayDataset`: Supports a list of concepts (e.g., 5 pathologies with distinct tokens sks1..sks5)
-     alongside class images for Prior Preservation.
-  3. `collate_fn`: Concatenates instance and class tensors along the batch dimension for single-pass forward.
+on chest X-ray images (Trains all pathologies into a single LoRA checkpoint).
 """
 
 from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -66,21 +60,21 @@ def list_images(directory: Union[str, Path]) -> List[Path]:
 
 
 # --------------------------------------------------------------------------
-# 2. Multi-Concept DreamBooth Dataset
+# 2. Multi-Concept DreamBooth Dataset (1-Checkpoint Unified Training)
 # --------------------------------------------------------------------------
 
 
 class DreamBoothXrayDataset(Dataset):
     """
-    Dataset hỗ trợ đồng thời Single-Concept và Multi-Concept DreamBooth.
+    Dataset gom toàn bộ các bệnh (Multi-Concept) vào huấn luyện 1 checkpoint LoRA duy nhất.
     
-    Tham số `concepts_list` nhận vào một danh sách các dict, ví dụ:
+    Cấu trúc `concepts_list` truyền vào:
     [
-        {"instance_data_root": ".../pneumonia", "instance_prompt": "a chest x-ray of sks1 pneumonia"},
-        {"instance_data_root": ".../effusion", "instance_prompt": "a chest x-ray of sks2 effusion"},
-        {"instance_data_root": ".../pneumothorax", "instance_prompt": "a chest x-ray of sks3 pneumothorax"},
-        {"instance_data_root": ".../atelectasis", "instance_prompt": "a chest x-ray of sks4 atelectasis"},
-        {"instance_data_root": ".../cardiomegaly", "instance_prompt": "a chest x-ray of sks5 cardiomegaly"},
+        {"instance_data_root": "./data/pneumonia",    "instance_prompt": "a chest x-ray of sks1 pneumonia"},
+        {"instance_data_root": "./data/effusion",     "instance_prompt": "a chest x-ray of sks2 effusion"},
+        {"instance_data_root": "./data/pneumothorax", "instance_prompt": "a chest x-ray of sks3 pneumothorax"},
+        {"instance_data_root": "./data/atelectasis",  "instance_prompt": "a chest x-ray of sks4 atelectasis"},
+        {"instance_data_root": "./data/cardiomegaly", "instance_prompt": "a chest x-ray of sks5 cardiomegaly"},
     ]
     """
 
@@ -88,7 +82,6 @@ class DreamBoothXrayDataset(Dataset):
         self,
         tokenizer,
         concepts_list: Optional[List[Dict[str, str]]] = None,
-        # Các tham số dưới dùng cho chế độ đơn nhãn (legacy compatibility)
         instance_data_root: Optional[Union[str, Path]] = None,
         instance_prompt: Optional[str] = None,
         class_data_root: Optional[Union[str, Path]] = None,
@@ -103,10 +96,11 @@ class DreamBoothXrayDataset(Dataset):
         self.tokenizer_max_length = tokenizer_max_length or getattr(tokenizer, "model_max_length", 77)
         self.use_percentile_norm = use_percentile_norm
 
-        # 1. Tổng hợp danh sách (ảnh, prompt) cho tất cả concepts
+        # 1. Gom danh sách ảnh và prompt cho từng concept
         self.instance_items: List[Tuple[Path, str]] = []
 
         if concepts_list is not None:
+            # Multi-concept mode: gom toàn bộ ảnh từ các thư mục bệnh khác nhau
             for concept in concepts_list:
                 c_dir = Path(concept["instance_data_root"])
                 c_prompt = concept["instance_prompt"]
@@ -115,7 +109,9 @@ class DreamBoothXrayDataset(Dataset):
                     raise ValueError(f"Không tìm thấy ảnh trong thư mục: {c_dir}")
                 for img_p in imgs:
                     self.instance_items.append((img_p, c_prompt))
+            print(f"[Dataset] Đã nạp thành công {len(concepts_list)} concepts với tổng cộng {len(self.instance_items)} ảnh.")
         elif instance_data_root is not None and instance_prompt is not None:
+            # Single-concept legacy mode
             imgs = list_images(instance_data_root)
             if not imgs:
                 raise ValueError(f"Không tìm thấy ảnh trong thư mục: {instance_data_root}")
@@ -124,11 +120,11 @@ class DreamBoothXrayDataset(Dataset):
         else:
             raise ValueError("Cần cung cấp concepts_list hoặc instance_data_root + instance_prompt.")
 
-        # Xáo trộn thứ tự các concept để các batch trong epoch được phân bổ đều
+        # Xáo trộn toàn bộ mẫu để mỗi mini-batch nhận ngẫu nhiên các loại bệnh khác nhau
         random.shuffle(self.instance_items)
         self.num_instance_images = len(self.instance_items)
 
-        # 2. Xử lý tập Prior Preservation (Class Images)
+        # 2. Xử lý tập đối chứng Prior Preservation (Class Images chung)
         self.with_prior_preservation = class_data_root is not None
         if self.with_prior_preservation:
             self.class_data_root = Path(class_data_root)
@@ -137,13 +133,14 @@ class DreamBoothXrayDataset(Dataset):
                 raise ValueError(f"with_prior_preservation=True nhưng không thấy ảnh tại {class_data_root}")
             self.class_prompt = class_prompt or "a chest x-ray"
             self.num_class_images = len(self.class_images_path)
+            print(f"[Dataset] Đã nạp {self.num_class_images} ảnh class cho Prior Preservation.")
         else:
             self.class_images_path = []
             self.num_class_images = 0
 
         self._length = max(self.num_instance_images, self.num_class_images)
 
-        # Pipeline biến đổi Tensor
+        # 3. Pipeline xử lý ảnh
         transforms = [T.Resize((size, size), interpolation=T.InterpolationMode.LANCZOS)]
         if random_flip:
             transforms.append(T.RandomHorizontalFlip(p=0.5))
@@ -169,11 +166,12 @@ class DreamBoothXrayDataset(Dataset):
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         example: Dict[str, torch.Tensor] = {}
 
-        # Lấy cặp (ảnh, prompt tương ứng của concept đó)
+        # Lấy ảnh bệnh và prompt tương ứng của concept đó
         instance_path, prompt_text = self.instance_items[index % self.num_instance_images]
         example["instance_images"] = self._load_tensor(instance_path)
         example["instance_prompt_ids"] = self._tokenize(prompt_text)
 
+        # Lấy ảnh đối chứng ngực chuẩn
         if self.with_prior_preservation:
             class_path = self.class_images_path[index % self.num_class_images]
             example["class_images"] = self._load_tensor(class_path)
@@ -183,7 +181,7 @@ class DreamBoothXrayDataset(Dataset):
 
 
 # --------------------------------------------------------------------------
-# 3. Collate function & Helper Datasets
+# 3. Collate function
 # --------------------------------------------------------------------------
 
 
@@ -200,16 +198,3 @@ def collate_fn(examples: Sequence[Dict[str, torch.Tensor]], with_prior_preservat
     input_ids = torch.stack(input_ids)
 
     return {"pixel_values": pixel_values, "input_ids": input_ids}
-
-
-class PromptDataset(Dataset):
-    """Dataset sinh ảnh class khi cần tạo động."""
-    def __init__(self, prompt: str, num_samples: int):
-        self.prompt = prompt
-        self.num_samples = num_samples
-
-    def __len__(self) -> int:
-        return self.num_samples
-
-    def __getitem__(self, index: int) -> Dict[str, Union[str, int]]:
-        return {"prompt": self.prompt, "index": index}
