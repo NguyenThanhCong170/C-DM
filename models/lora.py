@@ -1,366 +1,346 @@
 """
-LoRA (Low-Rank Adaptation) modules for efficient fine-tuning of Stable Diffusion U-Net.
+LoRA (Low-Rank Adaptation) cho U-Net của Stable Diffusion — implementation thuần PyTorch.
 
-LoRA injects low-rank trainable adapters into attention/projection layers while keeping
-the base model frozen. This drastically reduces trainable parameters while maintaining
-good fine-tuning performance.
+Điểm khác so với bản trước:
+  * KHÔNG có bias riêng trong adapter (bản cũ copy bias của base layer rồi cộng lần
+    thứ hai vào output -> bias bị nhân đôi ngay từ step 0).
+  * Adapter được tạo trực tiếp trên device của base layer -> inject trước hay sau
+    `.to(device)` đều đúng.
+  * Tham số LoRA luôn giữ float32 (chuẩn cho AMP), forward tự cast theo base output.
+  * Hỗ trợ cả nn.Linear và nn.Conv2d.
+  * API: inject_lora / lora_parameters / num_trainable_parameters /
+    save_lora_weights / load_lora_weights_into / save_lora_config / merge_and_unload.
 
-Paper: https://arxiv.org/abs/2106.09714
+Paper: https://arxiv.org/abs/2106.09685
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+import json
+import math
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
+DEFAULT_TARGET_MODULES: Tuple[str, ...] = (
+    "to_q",       # query projection
+    "to_k",       # key projection
+    "to_v",       # value projection
+    "to_out.0",   # output projection của attention
+)
+
+# Gợi ý nếu muốn tăng capacity (áp cho cả conv của ResNet block):
+#   --target_modules to_q to_k to_v to_out.0 proj_in proj_out conv1 conv2
+CONV_TARGET_MODULES: Tuple[str, ...] = ("conv1", "conv2", "conv_shortcut")
+
 
 @dataclass
 class LoRAConfig:
-    """Configuration for LoRA injection into model layers."""
-    
+    """Cấu hình LoRA. `scaling = alpha / rank`."""
+
     rank: int = 4
-    """Inner dimension of LoRA matrices (A, B)."""
-    
     alpha: float = 1.0
-    """Scaling factor for LoRA outputs. Effective LR = (alpha/rank) * base_lr."""
-    
-    target_modules: List[str] = field(default_factory=lambda: DEFAULT_TARGET_MODULES)
-    """Which module names to inject LoRA into (substring matching)."""
-    
-    lora_dropout: float = 0.0
-    """Dropout rate applied to LoRA inputs."""
-    
-    bias: str = "none"
-    """Whether to train biases: "none", "all", or "lora_only"."""
-    
-    modules_to_save: Optional[List[str]] = None
-    """Optionally save (and fine-tune) whole modules alongside LoRA."""
-    
-    inference_mode: bool = False
-    """If True, merge LoRA into the base model weights (reduces memory, no gradient tracking)."""
+    target_modules: Sequence[str] = DEFAULT_TARGET_MODULES
+    dropout: float = 0.0
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "rank": self.rank,
+            "alpha": self.alpha,
+            "target_modules": list(self.target_modules),
+            "dropout": self.dropout,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, object]) -> "LoRAConfig":
+        return cls(
+            rank=int(d["rank"]),
+            alpha=float(d["alpha"]),
+            target_modules=tuple(d.get("target_modules", DEFAULT_TARGET_MODULES)),
+            dropout=float(d.get("dropout", 0.0)),
+        )
 
 
-DEFAULT_TARGET_MODULES = [
-    "to_q",  # Query projection in attention
-    "to_k",  # Key projection in attention
-    "to_v",  # Value projection in attention
-    "to_out.0",  # Output projection in attention
-]
+# --------------------------------------------------------------------------
+# Adapter modules
+# --------------------------------------------------------------------------
 
 
-class LoRALinear(nn.Module):
-    """
-    LoRA-adapted Linear layer.
-    
-    Wraps a frozen nn.Linear with trainable low-rank matrices A ∈ ℝ^(r × in),
-    B ∈ ℝ^(out × r). Output = base(x) + scale * B @ A @ x
-    
-    This keeps base weights frozen while training only O(2 * rank * in * out) parameters
-    instead of O(in * out) for a full fine-tune.
-    """
-    
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        rank: int = 4,
-        alpha: float = 1.0,
-        dropout: float = 0.0,
-        bias: bool = True,
-    ):
+class _LoRABase(nn.Module):
+    """Phần dùng chung: giữ base layer đóng băng + cờ merged."""
+
+    def __init__(self, base_layer: nn.Module, rank: int, alpha: float, dropout: float):
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.rank = rank
-        self.alpha = alpha
-        self.scaling = alpha / rank
-        
-        # Base frozen linear layer (wrapped, not created)
-        self.base_layer = None  # Will be set after wrapping
-        
-        # LoRA matrices
+        if rank <= 0:
+            raise ValueError(f"rank phải > 0, nhận {rank}")
+        self.base_layer = base_layer
+        self.rank = int(rank)
+        self.alpha = float(alpha)
+        self.scaling = float(alpha) / float(rank)
+        self.lora_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.merged = False
+
+        for p in self.base_layer.parameters():
+            p.requires_grad_(False)
+
+    def extra_repr(self) -> str:
+        return f"rank={self.rank}, alpha={self.alpha}, scaling={self.scaling:.4f}"
+
+
+class LoRALinear(_LoRABase):
+    """nn.Linear đóng băng + nhánh low-rank: y = W x + b + (alpha/r) * B A x."""
+
+    def __init__(self, base_layer: nn.Linear, rank: int = 4, alpha: float = 1.0, dropout: float = 0.0):
+        super().__init__(base_layer, rank, alpha, dropout)
+        w = base_layer.weight
+        # LoRA params luôn fp32, tạo sẵn trên device của base layer.
         self.lora_a = nn.Parameter(
-            torch.randn(rank, in_features) / (in_features**0.5)
+            torch.empty(self.rank, base_layer.in_features, device=w.device, dtype=torch.float32)
         )
         self.lora_b = nn.Parameter(
-            torch.zeros(out_features, rank)
+            torch.zeros(base_layer.out_features, self.rank, device=w.device, dtype=torch.float32)
         )
-        
-        # Dropout and bias
-        self.lora_dropout = nn.Dropout(dropout)
-        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
-    
+        nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))  # B = 0 -> delta W = 0 lúc khởi tạo
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: base output + LoRA adaptation.
-        
-        Args:
-            x: Input tensor (..., in_features)
-            
-        Returns:
-            Output tensor (..., out_features)
-        """
-        # Base forward pass (frozen)
         base_out = self.base_layer(x)
-        
-        # LoRA path: x -> A -> dropout -> B -> scale
-        lora_out = self.lora_dropout(x) @ self.lora_a.T  # (..., rank)
-        lora_out = lora_out @ self.lora_b.T  # (..., out_features)
-        lora_out = lora_out * self.scaling
-        
-        # Add LoRA bias if applicable
-        if self.bias is not None:
-            lora_out = lora_out + self.bias
-        
-        return base_out + lora_out
+        if self.merged:
+            return base_out
+        h = self.lora_dropout(x).to(self.lora_a.dtype)
+        lora_out = (h @ self.lora_a.T) @ self.lora_b.T
+        return base_out + (lora_out * self.scaling).to(base_out.dtype)
+
+    @torch.no_grad()
+    def delta_weight(self) -> torch.Tensor:
+        return (self.lora_b @ self.lora_a) * self.scaling
 
 
-class LoRAWrapper:
-    """
-    Helper class to wrap a nn.Linear layer with LoRA adaptation.
-    Replaces the forward method while keeping the original layer accessible.
-    """
-    
-    def __init__(
-        self,
-        linear_layer: nn.Linear,
-        rank: int = 4,
-        alpha: float = 1.0,
-        dropout: float = 0.0,
-        bias: bool = True,
-    ):
-        self.linear_layer = linear_layer
-        self.rank = rank
-        self.alpha = alpha
-        self.dropout = dropout
-        self.bias = bias
-        
-        # Store original forward
-        self.original_forward = linear_layer.forward
-    
-    def apply(self) -> LoRALinear:
-        """Create a LoRA-adapted version of the linear layer."""
-        lora_linear = LoRALinear(
-            in_features=self.linear_layer.in_features,
-            out_features=self.linear_layer.out_features,
-            rank=self.rank,
-            alpha=self.alpha,
-            dropout=self.dropout,
-            bias=self.bias and (self.linear_layer.bias is not None),
+class LoRAConv2d(_LoRABase):
+    """nn.Conv2d đóng băng + nhánh low-rank (conv k×k rank chiều -> conv 1×1)."""
+
+    def __init__(self, base_layer: nn.Conv2d, rank: int = 4, alpha: float = 1.0, dropout: float = 0.0):
+        super().__init__(base_layer, rank, alpha, dropout)
+        if base_layer.groups != 1:
+            raise NotImplementedError("LoRAConv2d chưa hỗ trợ grouped convolution")
+        w = base_layer.weight
+        self.lora_a = nn.Parameter(
+            torch.empty(self.rank, base_layer.in_channels, *base_layer.kernel_size,
+                        device=w.device, dtype=torch.float32)
         )
-        
-        # Attach original layer as base_layer
-        lora_linear.base_layer = self.linear_layer
-        
-        # Copy original bias if applicable
-        if self.linear_layer.bias is not None and lora_linear.bias is not None:
-            with torch.no_grad():
-                lora_linear.bias.copy_(self.linear_layer.bias)
-        
-        return lora_linear
+        self.lora_b = nn.Parameter(
+            torch.zeros(base_layer.out_channels, self.rank, 1, 1, device=w.device, dtype=torch.float32)
+        )
+        nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_out = self.base_layer(x)
+        if self.merged:
+            return base_out
+        h = self.lora_dropout(x).to(self.lora_a.dtype)
+        h = F.conv2d(
+            h, self.lora_a,
+            stride=self.base_layer.stride,
+            padding=self.base_layer.padding,
+            dilation=self.base_layer.dilation,
+        )
+        h = F.conv2d(h, self.lora_b)
+        return base_out + (h * self.scaling).to(base_out.dtype)
+
+    @torch.no_grad()
+    def delta_weight(self) -> torch.Tensor:
+        delta = self.lora_b.flatten(1) @ self.lora_a.flatten(1)  # (out, in*k*k)
+        return delta.view_as(self.base_layer.weight) * self.scaling
 
 
-def inject_lora_into_unet(
-    unet: nn.Module,
-    config: LoRAConfig,
-) -> Dict[str, LoRALinear]:
+LoRAModule = Union[LoRALinear, LoRAConv2d]
+
+
+# --------------------------------------------------------------------------
+# Injection
+# --------------------------------------------------------------------------
+
+
+def _matches(full_name: str, targets: Sequence[str]) -> bool:
+    # So khớp theo hậu tố đường dẫn module để tránh bắt nhầm tên chứa substring.
+    return any(full_name == t or full_name.endswith("." + t) for t in targets)
+
+
+def inject_lora(
+    model: nn.Module,
+    target_modules: Sequence[str] = DEFAULT_TARGET_MODULES,
+    rank: int = 4,
+    alpha: float = 1.0,
+    dropout: float = 0.0,
+    verbose: bool = False,
+) -> Dict[str, LoRAModule]:
     """
-    Inject LoRA adapters into a Stable Diffusion U-Net.
-    
-    Recursively finds all nn.Linear layers matching target_modules and wraps them
-    with LoRA. Freezes the base model.
-    
-    Args:
-        unet: The Stable Diffusion U-Net module.
-        config: LoRAConfig specifying rank, alpha, target modules, etc.
-        
-    Returns:
-        Dictionary of injected LoRA layers for reference/checkpointing.
+    Đóng băng toàn bộ `model` rồi thay các layer khớp `target_modules` bằng adapter LoRA.
+
+    Trả về dict {đường_dẫn_module: adapter} — dùng làm "handle" cho optimizer,
+    save/load và merge. Adapter được tạo trên đúng device của layer gốc nên có thể
+    gọi trước hoặc sau `model.to(device)` đều được.
     """
-    lora_layers = {}
-    
-    # Freeze all base parameters
-    for param in unet.parameters():
-        param.requires_grad = False
-    
-    # Recursively inject LoRA
-    def inject_recursive(module: nn.Module, prefix: str = ""):
-        for name, child in module.named_children():
+    target_modules = tuple(target_modules)
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    injected: Dict[str, LoRAModule] = {}
+
+    def _recurse(module: nn.Module, prefix: str = "") -> None:
+        for name, child in list(module.named_children()):
             full_name = f"{prefix}.{name}" if prefix else name
-            
-            # Check if this is a Linear layer to adapt
-            if isinstance(child, nn.Linear):
-                # Check if name matches any target module
-                if any(target in full_name for target in config.target_modules):
-                    # Replace with LoRA-wrapped version
-                    lora_linear = LoRALinear(
-                        in_features=child.in_features,
-                        out_features=child.out_features,
-                        rank=config.rank,
-                        alpha=config.alpha,
-                        dropout=config.lora_dropout,
-                        bias=child.bias is not None,
-                    )
-                    
-                    lora_linear.base_layer = child
-                    
-                    # Copy original bias if exists
-                    if child.bias is not None:
-                        with torch.no_grad():
-                            lora_linear.bias.copy_(child.bias)
-                    
-                    # Replace the layer in parent module
-                    setattr(module, name, lora_linear)
-                    
-                    lora_layers[full_name] = lora_linear
-                    print(f"✓ Injected LoRA into {full_name} (rank={config.rank}, α={config.alpha})")
-            else:
-                # Recurse into child modules
-                inject_recursive(child, full_name)
-    
-    inject_recursive(unet)
-    
-    print(f"\n✓ Successfully injected LoRA into {len(lora_layers)} layers")
-    return lora_layers
+
+            if isinstance(child, (LoRALinear, LoRAConv2d)):
+                continue  # đã inject rồi, không lồng thêm
+
+            if _matches(full_name, target_modules):
+                if isinstance(child, nn.Linear):
+                    adapter: LoRAModule = LoRALinear(child, rank, alpha, dropout)
+                elif isinstance(child, nn.Conv2d):
+                    adapter = LoRAConv2d(child, rank, alpha, dropout)
+                else:
+                    _recurse(child, full_name)
+                    continue
+                setattr(module, name, adapter)
+                injected[full_name] = adapter
+                if verbose:
+                    print(f"  ✓ {full_name} ({type(child).__name__})")
+                continue
+
+            _recurse(child, full_name)
+
+    _recurse(model)
+
+    if not injected:
+        raise RuntimeError(
+            f"Không inject được adapter nào với target_modules={target_modules}. "
+            "Kiểm tra lại tên module (ví dụ: to_q to_k to_v to_out.0)."
+        )
+
+    for adapter in injected.values():
+        adapter.lora_a.requires_grad_(True)
+        adapter.lora_b.requires_grad_(True)
+    return injected
 
 
-def get_lora_parameters(model: nn.Module) -> List[nn.Parameter]:
-    """
-    Extract all trainable LoRA parameters from a model.
-    
-    Args:
-        model: Model containing LoRA layers.
-        
-    Returns:
-        List of LoRA parameter tensors.
-    """
-    params = []
-    for module in model.modules():
-        if isinstance(module, LoRALinear):
-            params.append(module.lora_a)
-            params.append(module.lora_b)
-            if module.bias is not None:
-                params.append(module.bias)
+def lora_parameters(injected: Dict[str, LoRAModule]) -> List[nn.Parameter]:
+    """Danh sách param trainable, thứ tự ổn định (dùng cho optimizer và clip_grad)."""
+    params: List[nn.Parameter] = []
+    for _, adapter in sorted(injected.items()):
+        params.append(adapter.lora_a)
+        params.append(adapter.lora_b)
     return params
 
 
+def num_trainable_parameters(injected: Dict[str, LoRAModule]) -> int:
+    return sum(p.numel() for p in lora_parameters(injected))
+
+
+# --------------------------------------------------------------------------
+# Save / load
+# --------------------------------------------------------------------------
+
+
+def save_lora_config(config: LoRAConfig, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config.to_dict(), f, indent=2, ensure_ascii=False)
+
+
+def load_lora_config(path: str) -> LoRAConfig:
+    with open(path, "r", encoding="utf-8") as f:
+        return LoRAConfig.from_dict(json.load(f))
+
+
 def save_lora_weights(
-    model: nn.Module,
+    injected: Dict[str, LoRAModule],
     output_path: str,
-    save_base: bool = False,
+    alpha: Optional[float] = None,
+    rank: Optional[int] = None,
+    extra_metadata: Optional[Dict[str, str]] = None,
 ) -> None:
-    """
-    Save LoRA weights to disk using safetensors format.
-    
-    Args:
-        model: Model with LoRA layers.
-        output_path: Path to save weights (e.g., 'model.safetensors').
-        save_base: If True, also save base model weights (large, usually not needed).
-    """
+    """Lưu lora_a/lora_b (fp32, trên CPU) ra safetensors kèm metadata rank/alpha."""
     state_dict = {}
-    
-    for name, module in model.named_modules():
-        if isinstance(module, LoRALinear):
-            # Save LoRA matrices
-            state_dict[f"{name}.lora_a"] = module.lora_a.data.cpu()
-            state_dict[f"{name}.lora_b"] = module.lora_b.data.cpu()
-            if module.bias is not None:
-                state_dict[f"{name}.bias"] = module.bias.data.cpu()
-    
-    # Optionally save base layer weights (only LoRA-adapted ones)
-    if save_base:
-        for name, module in model.named_modules():
-            if isinstance(module, LoRALinear) and module.base_layer is not None:
-                state_dict[f"{name}.base_weight"] = module.base_layer.weight.data.cpu()
-                if module.base_layer.bias is not None:
-                    state_dict[f"{name}.base_bias"] = module.base_layer.bias.data.cpu()
-    
-    save_file(state_dict, output_path)
-    print(f"✓ Saved {len(state_dict)} tensors to {output_path}")
+    for name, adapter in injected.items():
+        state_dict[f"{name}.lora_a"] = adapter.lora_a.detach().float().cpu().contiguous()
+        state_dict[f"{name}.lora_b"] = adapter.lora_b.detach().float().cpu().contiguous()
+
+    metadata = {"format": "cdm-lora-v1"}
+    if rank is not None:
+        metadata["rank"] = str(rank)
+    if alpha is not None:
+        metadata["alpha"] = str(alpha)
+    if extra_metadata:
+        metadata.update({k: str(v) for k, v in extra_metadata.items()})
+
+    save_file(state_dict, output_path, metadata=metadata)
 
 
-def load_lora_weights(
-    model: nn.Module,
+def load_lora_weights_into(
+    injected: Dict[str, LoRAModule],
     checkpoint_path: str,
+    strict: bool = True,
 ) -> None:
-    """
-    Load LoRA weights from disk.
-    
-    Args:
-        model: Model with LoRA layers to load weights into.
-        checkpoint_path: Path to saved LoRA weights.
-    """
+    """Nạp checkpoint LoRA vào các adapter đã inject sẵn (khớp theo tên module)."""
     state_dict = load_file(checkpoint_path)
-    
-    # Flatten model state to match checkpoint
-    model_state = {}
-    for name, module in model.named_modules():
-        if isinstance(module, LoRALinear):
-            model_state[f"{name}.lora_a"] = module.lora_a
-            model_state[f"{name}.lora_b"] = module.lora_b
-            if module.bias is not None:
-                model_state[f"{name}.bias"] = module.bias
-    
-    # Load weights
-    for key, value in state_dict.items():
-        if key in model_state:
-            model_state[key].data.copy_(value)
-            print(f"✓ Loaded {key}")
-        else:
-            print(f"⚠ Checkpoint key {key} not found in model")
-    
-    print(f"✓ Loaded {len([k for k in state_dict.keys() if k in model_state])} weights")
+
+    expected = set()
+    for name in injected:
+        expected.add(f"{name}.lora_a")
+        expected.add(f"{name}.lora_b")
+
+    missing = expected - set(state_dict)
+    unexpected = set(state_dict) - expected
+    if strict and (missing or unexpected):
+        raise RuntimeError(
+            f"Checkpoint không khớp cấu hình LoRA hiện tại.\n"
+            f"  thiếu {len(missing)} key (ví dụ: {sorted(missing)[:3]})\n"
+            f"  thừa  {len(unexpected)} key (ví dụ: {sorted(unexpected)[:3]})\n"
+            f"  -> kiểm tra --rank / --target_modules có giống lúc train không."
+        )
+
+    with torch.no_grad():
+        for name, adapter in injected.items():
+            for suffix, param in (("lora_a", adapter.lora_a), ("lora_b", adapter.lora_b)):
+                key = f"{name}.{suffix}"
+                if key not in state_dict:
+                    continue
+                tensor = state_dict[key]
+                if tensor.shape != param.shape:
+                    raise RuntimeError(f"{key}: shape checkpoint {tuple(tensor.shape)} "
+                                       f"!= shape model {tuple(param.shape)}")
+                param.copy_(tensor.to(param.device, param.dtype))
 
 
-def merge_lora_into_base(model: nn.Module) -> nn.Module:
+# --------------------------------------------------------------------------
+# Merge
+# --------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def merge_and_unload(model: nn.Module) -> nn.Module:
     """
-    Merge LoRA adapters into the base model weights permanently.
-    Useful for inference when you want a single model file without separate LoRA weights.
-    
-    Args:
-        model: Model with LoRA layers.
-        
-    Returns:
-        Model with LoRA merged (LoRA layers become regular Linear layers).
+    Cộng delta LoRA vào weight gốc và gỡ adapter, trả model về kiến trúc chuẩn.
+
+    Sau bước này state_dict lại đúng format gốc của diffusers (không còn tiền tố
+    `.base_layer.`), nên `unet.save_pretrained(...)` dùng được bình thường.
     """
-    for name, module in model.named_modules():
-        if isinstance(module, LoRALinear):
-            # Merge: W_merged = W_base + (α/r) * B @ A
-            merged_weight = module.base_layer.weight.data.clone()
-            merged_weight += module.scaling * module.lora_b @ module.lora_a
-            
-            # Create merged linear layer
-            merged_linear = nn.Linear(
-                module.in_features,
-                module.out_features,
-                bias=module.base_layer.bias is not None,
-            )
-            merged_linear.weight.data.copy_(merged_weight)
-            
-            if module.base_layer.bias is not None:
-                merged_linear.bias.data.copy_(module.base_layer.bias)
-            
-            # Replace LoRA layer with merged linear
-            parent_name = ".".join(name.split(".")[:-1])
-            child_name = name.split(".")[-1]
-            
-            parent_module = model
-            for part in parent_name.split("."):
-                if part:
-                    parent_module = getattr(parent_module, part)
-            
-            setattr(parent_module, child_name, merged_linear)
-            print(f"✓ Merged LoRA into {name}")
-    
+    def _recurse(module: nn.Module) -> None:
+        for name, child in list(module.named_children()):
+            if isinstance(child, (LoRALinear, LoRAConv2d)):
+                base = child.base_layer
+                delta = child.delta_weight().to(device=base.weight.device, dtype=base.weight.dtype)
+                base.weight.data += delta
+                setattr(module, name, base)
+            else:
+                _recurse(child)
+
+    _recurse(model)
     return model
 
 
 if __name__ == "__main__":
-    # Example usage
-    print("LoRA module loaded successfully!")
-    print(f"Default target modules: {DEFAULT_TARGET_MODULES}")
+    print("Default target modules:", DEFAULT_TARGET_MODULES)
