@@ -1,14 +1,7 @@
 """
 From-scratch diffusion math + a standalone DDIM sampling loop with
 classifier-free guidance (CFG), decoupled from any Diffusers `pipeline`
-object so it works with a raw (unet, vae, text_encoder, tokenizer) tuple —
-which is exactly what `train_custom_dreambooth.py` has in memory.
-
-`NoiseScheduler` implements the *forward* process (the SD 1.x "scaled
-linear" beta schedule) and is shared by both:
-  - training (`add_noise`, `compute_snr` for Min-SNR loss weighting), and
-  - inference (`set_timesteps` + the DDIM reverse step below),
-so both directions are guaranteed to use the exact same discretization.
+object so it works with a raw (unet, vae, text_encoder, tokenizer) tuple.
 """
 
 from __future__ import annotations
@@ -30,19 +23,7 @@ VAE_SCALING_FACTOR = 0.18215  # SD 1.x latent scale factor (AutoencoderKL config
 
 
 class NoiseScheduler:
-    """Re-implementation of the SD 1.x "scaled_linear" DDPM beta schedule.
-
-        beta_t interpolates linearly in sqrt-space between beta_start and
-        beta_end (this is what Stable Diffusion 1.x/2.x actually use, *not*
-        a plain linear beta schedule):
-
-            beta_t = (sqrt(beta_start) + t/(T-1) * (sqrt(beta_end) - sqrt(beta_start)))^2
-
-        alpha_t = 1 - beta_t
-        alpha_bar_t = prod_{s<=t} alpha_s
-
-    Forward process:  z_t = sqrt(alpha_bar_t) * z0 + sqrt(1 - alpha_bar_t) * eps
-    """
+    """Re-implementation of the SD 1.x "scaled_linear" DDPM beta schedule."""
 
     def __init__(
         self,
@@ -72,7 +53,7 @@ class NoiseScheduler:
     def compute_snr(self, timesteps: torch.Tensor) -> torch.Tensor:
         """SNR(t) = alpha_bar_t / (1 - alpha_bar_t), used for Min-SNR loss weighting."""
         ac = self.alphas_cumprod.to(device=timesteps.device, dtype=torch.float32)[timesteps]
-        return ac / (1 - ac).clamp(min=1e-8)
+        return ac / (1.0 - ac).clamp(min=1e-8)
 
     def set_timesteps(self, num_inference_steps: int, device: Union[str, torch.device] = "cpu") -> torch.Tensor:
         """Evenly-spaced descending subset of the training timesteps, for DDIM sampling."""
@@ -80,13 +61,11 @@ class NoiseScheduler:
             raise ValueError("num_inference_steps must be <= num_train_timesteps")
         step_ratio = self.num_train_timesteps // num_inference_steps
         timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].astype(np.int64).copy()
-        return torch.from_numpy(timesteps).to(device)
+        return torch.from_numpy(timesteps).to(device=device, dtype=torch.long)
 
 
 def min_snr_weights(snr: torch.Tensor, gamma: float) -> torch.Tensor:
-    """Min-SNR-gamma per-sample loss weight for epsilon-prediction models
-    (Hang et al., 2023): weight = min(SNR(t), gamma) / SNR(t).
-    """
+    """Min-SNR-gamma per-sample loss weight: weight = min(SNR(t), gamma) / SNR(t)."""
     return torch.clamp(snr, max=gamma) / snr.clamp(min=1e-8)
 
 
@@ -100,35 +79,27 @@ def ddim_step(
     eta: float = 0.0,
     generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    """One deterministic (eta=0) DDIM reverse step, epsilon-prediction parameterization.
-
-        x0_pred   = (x_t - sqrt(1 - ab_t) * eps_theta) / sqrt(ab_t)
-        x_{t-1}   = sqrt(ab_{t-1}) * x0_pred + sqrt(1 - ab_{t-1} - sigma_t^2) * eps_theta
-                    (+ sigma_t * z   if eta > 0, DDPM-like stochasticity)
-
-    where ab_t = alpha_bar_t. Latents are NOT clipped to [-1, 1] here — that
-    range is only meaningful in pixel space, not in VAE latent space.
-    """
+    """One deterministic (eta=0) DDIM reverse step, epsilon-prediction parameterization."""
     device = sample.device
-    ac_t = scheduler.alphas_cumprod.to(device)[timestep]
+    dtype = sample.dtype
+    ac_t = scheduler.alphas_cumprod.to(device=device, dtype=dtype)[timestep]
     ac_prev = (
-        scheduler.alphas_cumprod.to(device)[prev_timestep]
+        scheduler.alphas_cumprod.to(device=device, dtype=dtype)[prev_timestep]
         if prev_timestep >= 0
-        else torch.tensor(1.0, device=device)
+        else torch.tensor(1.0, device=device, dtype=dtype)
     )
 
-    pred_x0 = (sample - (1 - ac_t).sqrt() * model_output) / ac_t.sqrt()
+    pred_x0 = (sample - (1.0 - ac_t).sqrt() * model_output) / ac_t.sqrt()
 
     sigma_t = 0.0
     if eta > 0:
-        # Standard DDIM stochastic-variance formula.
-        sigma_t = eta * (((1 - ac_prev) / (1 - ac_t)) * (1 - ac_t / ac_prev)).clamp(min=0).sqrt()
+        sigma_t = eta * (((1.0 - ac_prev) / (1.0 - ac_t)) * (1.0 - ac_t / ac_prev)).clamp(min=0.0).sqrt()
 
-    dir_coeff = (1 - ac_prev - sigma_t**2).clamp(min=0).sqrt()
+    dir_coeff = (1.0 - ac_prev - sigma_t**2).clamp(min=0.0).sqrt()
     x_prev = ac_prev.sqrt() * pred_x0 + dir_coeff * model_output
 
     if eta > 0:
-        noise = torch.randn(sample.shape, generator=generator, device=device, dtype=sample.dtype)
+        noise = torch.randn(sample.shape, generator=generator, device=device, dtype=dtype)
         x_prev = x_prev + sigma_t * noise
 
     return x_prev
@@ -147,10 +118,7 @@ def encode_prompt(
     negative_prompts: List[str],
     device: Union[str, torch.device],
 ) -> torch.Tensor:
-    """Tokenize + encode `negative_prompts` and `prompts`, return them
-    concatenated along the batch dim as [uncond; cond] — the layout expected
-    by `sample()` below for a single-pass CFG forward.
-    """
+    """Tokenize + encode negative and positive prompts as [uncond; cond]."""
     def _encode(texts: List[str]) -> torch.Tensor:
         tokens = tokenizer(
             texts,
@@ -168,12 +136,13 @@ def encode_prompt(
 
 @torch.no_grad()
 def decode_latents(vae, latents: torch.Tensor) -> List[Image.Image]:
-    """Undo the 0.18215 scale factor, run vae.decode, convert to a list of PIL images."""
-    latents = latents.to(next(vae.parameters()).dtype)
-    pixel_values = vae.decode(latents / VAE_SCALING_FACTOR).sample  # (B, 3, H, W), in [-1, 1]
-    pixel_values = (pixel_values / 2 + 0.5).clamp(0, 1)
+    """Undo 0.18215 scaling, run vae.decode in float32 to avoid NaN, export PIL."""
+    # Ép sang float32 để chống tràn số / ảnh đen trên VAE
+    latents = (latents / VAE_SCALING_FACTOR).to(dtype=torch.float32)
+    pixel_values = vae.decode(latents).sample  # (B, 3, H, W)
+    pixel_values = (pixel_values / 2.0 + 0.5).clamp(0.0, 1.0)
     pixel_values = pixel_values.cpu().permute(0, 2, 3, 1).float().numpy()
-    images = (pixel_values * 255).round().astype("uint8")
+    images = (pixel_values * 255.0).round().astype("uint8")
     return [Image.fromarray(img) for img in images]
 
 
@@ -184,10 +153,6 @@ def decode_latents(vae, latents: torch.Tensor) -> List[Image.Image]:
 
 @dataclass
 class SDComponents:
-    """Bag of the four frozen/adapted sub-modules needed to sample — the
-    same objects the training script builds and holds LoRA-injected
-    references to."""
-
     unet: "torch.nn.Module"
     vae: "torch.nn.Module"
     text_encoder: "torch.nn.Module"
@@ -207,20 +172,20 @@ def sample(
     eta: float = 0.0,
     generator: Optional[torch.Generator] = None,
     device: Union[str, torch.device] = "cuda",
-    dtype: torch.dtype = torch.float16,
+    dtype: Optional[torch.dtype] = None,
     scheduler: Optional[NoiseScheduler] = None,
 ) -> List[Image.Image]:
-    """Standalone DDIM + classifier-free-guidance sampling loop.
-
-    `guidance_scale <= 1.0` disables CFG (runs conditional-only, one UNet
-    call per step instead of two) — matches Diffusers' convention.
-    """
+    """Standalone DDIM + classifier-free-guidance sampling loop."""
     unet, vae, text_encoder, tokenizer = (
         components.unet,
         components.vae,
         components.text_encoder,
         components.tokenizer,
     )
+    # Tự động đồng bộ dtype theo trọng số của UNet nếu không truyền vào
+    if dtype is None:
+        dtype = next(unet.parameters()).dtype
+
     scheduler = scheduler or NoiseScheduler()
     do_cfg = guidance_scale > 1.0
 
@@ -229,13 +194,13 @@ def sample(
     bsz = len(prompts)
 
     if do_cfg:
-        text_embeddings = encode_prompt(tokenizer, text_encoder, prompts, negatives, device).to(dtype)
+        text_embeddings = encode_prompt(tokenizer, text_encoder, prompts, negatives, device).to(dtype=dtype)
     else:
         tokens = tokenizer(
             prompts, padding="max_length", max_length=tokenizer.model_max_length,
             truncation=True, return_tensors="pt",
         ).input_ids.to(device)
-        text_embeddings = text_encoder(tokens)[0].to(dtype)
+        text_embeddings = text_encoder(tokens)[0].to(dtype=dtype)
 
     in_channels = unet.config.in_channels
     latent_h, latent_w = height // 8, width // 8
@@ -255,7 +220,7 @@ def sample(
             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
-        prev_t = timesteps[i + 1] if i + 1 < len(timesteps) else torch.tensor(-1, device=device)
+        prev_t = timesteps[i + 1] if i + 1 < len(timesteps) else torch.tensor(-1, device=device, dtype=torch.long)
         latents = ddim_step(scheduler, noise_pred, t, prev_t, latents, eta=eta, generator=generator)
 
     return decode_latents(vae, latents)
