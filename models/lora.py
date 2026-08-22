@@ -1,19 +1,3 @@
-"""
-LoRA (Low-Rank Adaptation) cho U-Net của Stable Diffusion — implementation thuần PyTorch.
-
-Điểm khác so với bản trước:
-  * KHÔNG có bias riêng trong adapter (bản cũ copy bias của base layer rồi cộng lần
-    thứ hai vào output -> bias bị nhân đôi ngay từ step 0).
-  * Adapter được tạo trực tiếp trên device của base layer -> inject trước hay sau
-    `.to(device)` đều đúng.
-  * Tham số LoRA luôn giữ float32 (chuẩn cho AMP), forward tự cast theo base output.
-  * Hỗ trợ cả nn.Linear và nn.Conv2d.
-  * API: inject_lora / lora_parameters / num_trainable_parameters /
-    save_lora_weights / load_lora_weights_into / save_lora_config / merge_and_unload.
-
-Paper: https://arxiv.org/abs/2106.09685
-"""
-
 from __future__ import annotations
 
 import json
