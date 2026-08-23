@@ -1,76 +1,139 @@
-# C-DM: DreamBooth & LoRA thuần PyTorch cho ảnh X-quang ngực
+# C-DM — Sinh ảnh X-quang ngực bằng Stable Diffusion thuần PyTorch
 
-## Tổng quan
-Dự án triển khai mô hình Stable Diffusion 1.x hoàn toàn bằng thư viện PyTorch gốc. Toàn bộ quy trình từ huấn luyện (Train) đến sinh ảnh (Inference) **không phụ thuộc** vào `diffusers` hay `transformers`. Chỉ sử dụng `torch`, `safetensors`, `numpy` và `Pillow`.
+Stable Diffusion 1.5 + LoRA (DreamBooth multi-concept) cho 5 bệnh lý phổi trên bộ NIH ChestX-ray14.
+Toàn bộ kiến trúc (U-Net, VAE, CLIP text encoder, tokenizer, sampler DPM-Solver++ 2M) được viết
+lại bằng `torch` gốc — **không dùng `diffusers` hay `transformers`**.
 
-Các thành phần cốt lõi được xây dựng độc lập bao gồm:
-- **U-Net:** `UNet2DConditionModel`
-- **VAE:** `AutoencoderKL`
-- **Text Encoder & Tokenizer:** Mạng CLIP text tower và CLIP BPE tokenizer (đọc trực tiếp `vocab.json` + `merges.txt`).
-- **Pipeline:** Noise Scheduler, DPM-Solver++ 2M Sampler (hỗ trợ CFG).
-- **PEFT:** Kiến trúc LoRALinear / LoRAConv2d, tích hợp cơ chế inject, merge và save/load.
-
-## Đặc điểm Kỹ thuật
-- **Tương thích `state_dict` tuyệt đối:** Kiến trúc mạng được đặt tên biến (module name) trùng khớp 100% với thư viện `diffusers`. Trọng số được nạp thẳng với cờ `strict=True`, loại bỏ hoàn toàn các bảng ánh xạ key phức tạp.
-- **Độ chính xác chuẩn toán học:** Sai số tối đa (maxdiff) khi nạp chéo trọng số giữa C-DM và bản chuẩn `diffusers` là $0.0$ (trùng khớp đến từng bit) cho U-Net, VAE và CLIPTextModel.
-- **Khả năng kế thừa:** Hàm load tự động nhận diện dạng checkpoint cũ (legacy attention keys như `query/key/value/proj_attn`) và chặn các config không thuộc kiến trúc SD 1.x (như `SD 2.x`, `v_prediction`, `SDXL`).
 
 ---
 
-## Chuẩn bị môi trường và Dữ liệu
+## Setup
 
-Base checkpoint yêu cầu phải được lưu thành thư mục cục bộ (local directory) theo cấu trúc chuẩn của Hugging Face.
+Cần GPU ~5GB VRAM (512×512, fp16).
 
 ```bash
-# Cài đặt thư viện nền tảng
+# 1. Thư viện
 pip install -r requirements.txt
+
+# 2. Base model SD 1.5 (bản fp16, ~2GB) — LoRA trong repo được train trên đúng model này
 pip install huggingface_hub
+hf download stable-diffusion-v1-5/stable-diffusion-v1-5 --local-dir ./sd15 \
+  scheduler/scheduler_config.json \
+  tokenizer/vocab.json tokenizer/merges.txt \
+  tokenizer/special_tokens_map.json tokenizer/tokenizer_config.json \
+  text_encoder/config.json text_encoder/model.fp16.safetensors \
+  vae/config.json vae/diffusion_pytorch_model.fp16.safetensors \
+  unet/config.json unet/diffusion_pytorch_model.fp16.safetensors
+```
 
-# Tải pre-trained checkpoint
-huggingface-cli download danyalmalik/stable-diffusion-chest-xray --local-dir ./ckpt/cxr
+Trọng số LoRA `checkpoint-4000.safetensors` và `lora_config.json` đã có sẵn ở thư mục gốc.
 
-python train.py \
-  --pretrained_model_name_or_path ./ckpt/cxr \
-  --concepts_list concepts.json \
-  --class_data_dir ./data/class_no_finding \
-  --with_prior_preservation \
-  --output_dir ./out/lora_multiconcept \
-  --rank 64 \
-  --lora_alpha 64 \
-  --train_batch_size 1 \
-  --gradient_accumulation_steps 4 \
-  --max_train_steps 4000 \
-  --learning_rate 1e-4 \
-  --lr_scheduler cosine \
-  --mixed_precision fp16 \
-  --gradient_checkpointing \
-  --snr_gamma 5.0 \
-  --validation_prompt "a chest x-ray of sks pneumonia" \
-  --validation_steps 500
+Cấu trúc sau khi setup:
 
-  import torch
+```
+C-DM/
+├── sd15/                          # base model SD 1.5 (cross_attention_dim = 768)
+├── checkpoint-4000.safetensors    # LoRA rank 16, 4000 step
+├── lora_config.json
+└── app.py
+```
+
+---
+
+## Sinh ảnh
+
+### Giao diện web
+
+```bash
+python app.py
+```
+
+Mở `http://127.0.0.1:7860`. Thêm `--share` để tạo link public tạm thời.
+
+### Prompt
+
+Token `sks` là identifier đã học lúc train — **bắt buộc có** thì mới ra ảnh X-quang đúng.
+
+```
+a chest x-ray of sks atelectasis
+a chest x-ray of sks cardiomegaly
+a chest x-ray of sks effusion
+a chest x-ray of sks infiltration
+a chest x-ray of sks pneumonia
+a chest x-ray of normal lungs
+```
+
+Tham số mặc định (25 bước, CFG 7.5) cho kết quả tốt. Thanh **Cường độ LoRA** kéo về `0`
+sẽ tắt LoRA để đối chiếu với SD 1.5 gốc.
+
+### Gọi từ Python
+
+```python
+import torch
 from models import load_sd_components, inject_lora, load_lora_config, load_lora_weights_into
 from pipeline.inference import NoiseScheduler, SDComponents, sample
 
-# 1. Nạp Base Model và lập lịch nhiễu (Noise Scheduler)
-tok, te, vae, unet, sched_cfg = load_sd_components("./ckpt/cxr")
-[m.to("cuda") for m in (te, vae, unet)]
+tok, te, vae, unet, sched_cfg = load_sd_components("./sd15", variant="fp16",
+                                                   torch_dtype=torch.float16)
+for m in (te, vae, unet):
+    m.to("cuda").eval()
 sched = NoiseScheduler.from_diffusers_config(sched_cfg)
 
-# 2. Tiêm (Inject) và nạp trọng số LoRA vào U-Net
-cfg = load_lora_config("out/lora_multiconcept/lora_config.json")
+cfg = load_lora_config("lora_config.json")
 inj = inject_lora(unet, cfg.target_modules, cfg.rank, cfg.alpha)
-load_lora_weights_into(inj, "out/lora_multiconcept/pytorch_lora_weights.safetensors")
+load_lora_weights_into(inj, "checkpoint-4000.safetensors")
 
-# 3. Lấy mẫu sinh ảnh (DPM-Solver++ 2M Sampling)
 imgs = sample(
     components=SDComponents(unet, vae, te, tok),
-    prompt="a chest x-ray of hta atelectasis",
+    prompt="a chest x-ray of sks pneumonia",
     negative_prompt="blurry, artifact",
     num_images=4,
     num_inference_steps=25,
     guidance_scale=7.5,
     generator=torch.Generator("cuda").manual_seed(0),
     device="cuda",
-    scheduler=sched
+    scheduler=sched,
 )
+imgs[0].save("out.png")
+```
+
+---
+
+## Train lại
+
+```bash
+python train.py \
+  --pretrained_model_name_or_path ./sd15 \
+  --variant fp16 \
+  --concepts_list concepts.json \
+  --class_data_dir ./data/class_no_finding \
+  --with_prior_preservation --prior_loss_weight 1.0 \
+  --output_dir ./out/lora \
+  --rank 16 --lora_alpha 16 \
+  --max_train_steps 4000 \
+  --train_batch_size 1 --gradient_accumulation_steps 8 \
+  --learning_rate 1e-4 --lr_scheduler cosine --lr_warmup_steps 200 \
+  --snr_gamma 5.0 \
+  --mixed_precision fp16 --gradient_checkpointing \
+  --checkpointing_steps 500 \
+  --validation_prompt "a chest x-ray of sks pneumonia" --validation_steps 250
+```
+
+Đây là cấu hình đã sinh ra `checkpoint-4000.safetensors` (5×1000 ảnh bệnh + 1000 ảnh
+"No Finding" làm prior preservation, ~4h trên Tesla T4).
+
+`concepts.json` khai báo 5 concept, đường dẫn tương đối so với thư mục gốc repo. Dữ liệu ảnh
+(`data/`) không kèm trong repo — tải NIH ChestX-ray14 rồi tiền xử lý về 512×512 grayscale,
+padding viền đen giữ tỉ lệ giải phẫu.
+
+---
+
+## Ghi chú kỹ thuật
+
+- Tên module đặt trùng `diffusers`, nạp `state_dict` thẳng với `strict=True`, không cần bảng
+  ánh xạ key. Hàm load tự nhận diện checkpoint attention kiểu cũ (`query/key/value/proj_attn`)
+  và chặn các config ngoài phạm vi hỗ trợ (SDXL, `v_prediction`).
+- Attention dùng `scaled_dot_product_attention` (FlashAttention/SDPA) — bộ nhớ O(N).
+- Sampler DPM-Solver++ 2M, hỗ trợ CFG. Đối chiếu với `DPMSolverMultistepScheduler` của
+  diffusers ở cùng seed: sai số trung bình ~7/255, phần chênh còn lại đến từ `steps_offset`
+  và `set_alpha_to_one` trong `scheduler_config.json` mà `NoiseScheduler` chưa đọc.
