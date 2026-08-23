@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Base model — tải theo hướng dẫn Setup trong README, không commit
+sd15/
+ckpt/
+
+# Dữ liệu train (NIH ChestX-ray14) và đầu ra khi train
+data/
+out/
+
+# Gradio
+.gradio/
+flagged/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Lưu ý: checkpoint-4000.safetensors (12MB) và lora_config.json KHÔNG bị ignore —
+# đó là trọng số LoRA đi kèm repo, README trỏ thẳng vào chúng.

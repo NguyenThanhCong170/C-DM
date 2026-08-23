@@ -114,8 +114,9 @@ def dpm_solver_2m_step(
     eps = model_output.float()
     x0_pred = (x - sigma_t * eps) / alpha_t
 
-    # Fallback về bậc 1 (Euler) nếu chưa có lịch sử
-    if x0_pred_prev is None or r_t is None:
+    # Bậc 1 (Euler) khi chưa có lịch sử, và ở bước cuối (s < 0: sigma_s = 0,
+    # lambda_s = +inf nên h = inf -> ngoại suy bậc 2 cho ra NaN).
+    if x0_pred_prev is None or r_t is None or s < 0:
         x_prev = alpha_s * x0_pred + sigma_s * eps
         return x_prev.to(dtype), x0_pred
 
@@ -127,9 +128,15 @@ def dpm_solver_2m_step(
     h_old = lambda_t - lambda_r
     r = h / h_old
 
-    # Ngoại suy x_0 và cập nhật nghiệm
+    # Ngoại suy x_0 (D trong bài báo DPM-Solver++)
     x0_pred_hat = x0_pred + 0.5 * r * (x0_pred - x0_pred_prev)
-    x_prev = alpha_s * x0_pred_hat + sigma_s * eps
+
+    # Cập nhật nghiệm theo đúng công thức bậc 2:
+    #     x_s = (sigma_s/sigma_t)·x_t − alpha_s·(e^(−h) − 1)·D
+    # KHÔNG dùng dạng DDIM `alpha_s·D + sigma_s·eps`: hai vế chỉ bằng nhau khi
+    # D == x0_pred (tức bậc 1). Ở bậc 2 nó thiếu hạng (alpha_t·sigma_s/sigma_t)·(x0_pred − D),
+    # sai số tích lũy qua từng bước làm ảnh bị gắt và cháy tương phản.
+    x_prev = (sigma_s / sigma_t) * x - alpha_s * (torch.exp(-h) - 1.0) * x0_pred_hat
 
     return x_prev.to(dtype), x0_pred
 
