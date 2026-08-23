@@ -780,7 +780,9 @@ class UNet2DConditionModel(nn.Module):
             flip_sin_to_cos=True,
             downscale_freq_shift=0.0,
         )
-        emb = self.time_embedding(t_emb)
+        # get_timestep_embedding luôn trả fp32 (chuẩn diffusers) — ép về dtype của
+        # model trước khi qua Linear, nếu không sẽ lỗi khi chạy fp16.
+        emb = self.time_embedding(t_emb.to(dtype=sample.dtype))
 
         sample = self.conv_in(sample)
 
