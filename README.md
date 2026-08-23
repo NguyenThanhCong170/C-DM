@@ -12,7 +12,8 @@ lại bằng `torch` gốc — **không dùng `diffusers` hay `transformers`**.
 Cần GPU ~5GB VRAM (512×512, fp16).
 
 ```bash
-# 1. Thư viện
+# 1. Clone và cài thư viện
+git clone https://github.com/NguyenThanhCong170/C-DM && cd C-DM
 pip install -r requirements.txt
 
 # 2. Base model SD 1.5 (bản fp16, ~2GB) — LoRA trong repo được train trên đúng model này
@@ -26,15 +27,16 @@ hf download stable-diffusion-v1-5/stable-diffusion-v1-5 --local-dir ./sd15 \
   unet/config.json unet/diffusion_pytorch_model.fp16.safetensors
 ```
 
-Trọng số LoRA `checkpoint-4000.safetensors` và `lora_config.json` đã có sẵn ở thư mục gốc.
+Trọng số LoRA `checkpoint-4000.safetensors` (12MB) đã có sẵn trong repo — `rank`, `alpha` và
+danh sách module đích đọc thẳng từ metadata của file, không cần file config kèm theo.
 
 Cấu trúc sau khi setup:
 
 ```
 C-DM/
-├── sd15/                          # base model SD 1.5 (cross_attention_dim = 768)
-├── checkpoint-4000.safetensors    # LoRA rank 16, 4000 step
-├── lora_config.json
+├── sd15/                          # base model SD 1.5 (cross_attention_dim = 768), tự tải
+├── checkpoint-4000.safetensors    # LoRA rank 16, 4000 step — có sẵn trong repo
+├── concepts.json                  # khai báo concept, chỉ cần khi train lại
 └── app.py
 ```
 
@@ -70,7 +72,7 @@ sẽ tắt LoRA để đối chiếu với SD 1.5 gốc.
 
 ```python
 import torch
-from models import load_sd_components, inject_lora, load_lora_config, load_lora_weights_into
+from models import load_sd_components, inject_lora, load_lora_weights_into
 from pipeline.inference import NoiseScheduler, SDComponents, sample
 
 tok, te, vae, unet, sched_cfg = load_sd_components("./sd15", variant="fp16",
@@ -79,8 +81,8 @@ for m in (te, vae, unet):
     m.to("cuda").eval()
 sched = NoiseScheduler.from_diffusers_config(sched_cfg)
 
-cfg = load_lora_config("lora_config.json")
-inj = inject_lora(unet, cfg.target_modules, cfg.rank, cfg.alpha)
+# rank/alpha/target_modules của checkpoint đi kèm repo
+inj = inject_lora(unet, ["to_q", "to_k", "to_v", "to_out.0"], rank=16, alpha=16)
 load_lora_weights_into(inj, "checkpoint-4000.safetensors")
 
 imgs = sample(
@@ -127,13 +129,3 @@ python train.py \
 padding viền đen giữ tỉ lệ giải phẫu.
 
 ---
-
-## Ghi chú kỹ thuật
-
-- Tên module đặt trùng `diffusers`, nạp `state_dict` thẳng với `strict=True`, không cần bảng
-  ánh xạ key. Hàm load tự nhận diện checkpoint attention kiểu cũ (`query/key/value/proj_attn`)
-  và chặn các config ngoài phạm vi hỗ trợ (SDXL, `v_prediction`).
-- Attention dùng `scaled_dot_product_attention` (FlashAttention/SDPA) — bộ nhớ O(N).
-- Sampler DPM-Solver++ 2M, hỗ trợ CFG. Đối chiếu với `DPMSolverMultistepScheduler` của
-  diffusers ở cùng seed: sai số trung bình ~7/255, phần chênh còn lại đến từ `steps_offset`
-  và `set_alpha_to_one` trong `scheduler_config.json` mà `NoiseScheduler` chưa đọc.
