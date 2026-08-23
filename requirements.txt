@@ -4,6 +4,7 @@ torchvision
 safetensors>=0.4
 Pillow
 numpy
-regex           
+regex
 
- 
+# Demo web
+gradio>=5
