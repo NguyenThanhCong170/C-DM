@@ -1,4 +1,4 @@
- # C-DM: DreamBooth & LoRA thuần PyTorch cho ảnh X-quang ngực
+# C-DM: DreamBooth & LoRA thuần PyTorch cho ảnh X-quang ngực
 
 ## Tổng quan
 Dự án triển khai mô hình Stable Diffusion 1.x hoàn toàn bằng thư viện PyTorch gốc. Toàn bộ quy trình từ huấn luyện (Train) đến sinh ảnh (Inference) **không phụ thuộc** vào `diffusers` hay `transformers`. Chỉ sử dụng `torch`, `safetensors`, `numpy` và `Pillow`.
@@ -7,7 +7,7 @@ Các thành phần cốt lõi được xây dựng độc lập bao gồm:
 - **U-Net:** `UNet2DConditionModel`
 - **VAE:** `AutoencoderKL`
 - **Text Encoder & Tokenizer:** Mạng CLIP text tower và CLIP BPE tokenizer (đọc trực tiếp `vocab.json` + `merges.txt`).
-- **Pipeline:**
+- **Pipeline:** Noise Scheduler, DPM-Solver++ 2M Sampler (hỗ trợ CFG).
 - **PEFT:** Kiến trúc LoRALinear / LoRAConv2d, tích hợp cơ chế inject, merge và save/load.
 
 ## Đặc điểm Kỹ thuật
@@ -48,11 +48,7 @@ python train.py \
   --validation_prompt "a chest x-ray of sks pneumonia" \
   --validation_steps 500
 
-## Suy luận và Sinh ảnh (Inference)
-
-## Pipeline sinh ảnh tự viết cho phép nạp trực tiếp file pytorch_lora_weights.safetensors vào mạng U-Net và khử nhiễu.
-```Bash 
-import torch
+  import torch
 from models import load_sd_components, inject_lora, load_lora_config, load_lora_weights_into
 from pipeline.inference import NoiseScheduler, SDComponents, sample
 
@@ -66,13 +62,13 @@ cfg = load_lora_config("out/lora_multiconcept/lora_config.json")
 inj = inject_lora(unet, cfg.target_modules, cfg.rank, cfg.alpha)
 load_lora_weights_into(inj, "out/lora_multiconcept/pytorch_lora_weights.safetensors")
 
-# 3. Lấy mẫu sinh ảnh (DDIM Sampling)
+# 3. Lấy mẫu sinh ảnh (DPM-Solver++ 2M Sampling)
 imgs = sample(
     components=SDComponents(unet, vae, te, tok),
     prompt="a chest x-ray of hta atelectasis",
     negative_prompt="blurry, artifact",
     num_images=4,
-    num_inference_steps=50,
+    num_inference_steps=25,
     guidance_scale=7.5,
     generator=torch.Generator("cuda").manual_seed(0),
     device="cuda",

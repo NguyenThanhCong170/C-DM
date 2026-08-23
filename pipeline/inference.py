@@ -7,13 +7,12 @@ import numpy as np
 import torch
 from PIL import Image
 
-VAE_SCALING_FACTOR = 0.18215  # hệ số scale latent của SD 1.x (AutoencoderKL config)
+VAE_SCALING_FACTOR = 0.18215  # Hệ số scale latent của SD 1.x (AutoencoderKL config)
 
 
 # --------------------------------------------------------------------------
 # Forward process / schedule
 # --------------------------------------------------------------------------
-
 
 class NoiseScheduler:
     """Cài đặt lại lịch beta "scaled_linear" (DDPM) của SD 1.x."""
@@ -45,8 +44,7 @@ class NoiseScheduler:
     @classmethod
     def from_diffusers_config(cls, config) -> "NoiseScheduler":
         """
-        Dựng scheduler từ config của checkpoint (DDPMScheduler.config) để lịch nhiễu
-        lúc train/sinh ảnh trùng đúng với lịch mà checkpoint nền được huấn luyện.
+        Dựng scheduler từ config của checkpoint (DDPMScheduler.config).
         """
         get = (lambda k, d=None: config.get(k, d)) if isinstance(config, dict) else (lambda k, d=None: getattr(config, k, d))
 
@@ -62,30 +60,13 @@ class NoiseScheduler:
             beta_schedule=str(get("beta_schedule", "scaled_linear")),
         )
 
-    def add_noise(self, x0: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
-        """z_t = sqrt(alpha_bar_t) z0 + sqrt(1 - alpha_bar_t) eps, batch theo `timesteps`."""
-        ac = self.alphas_cumprod.to(device=x0.device, dtype=torch.float32)[timesteps]
-        while ac.dim() < x0.dim():
-            ac = ac.unsqueeze(-1)
-        return (ac.sqrt() * x0.float() + (1 - ac).sqrt() * noise.float()).to(x0.dtype)
-
-    def compute_snr(self, timesteps: torch.Tensor) -> torch.Tensor:
-        """SNR(t) = alpha_bar_t / (1 - alpha_bar_t), dùng cho Min-SNR weighting."""
-        ac = self.alphas_cumprod.to(device=timesteps.device, dtype=torch.float32)[timesteps]
-        return ac / (1.0 - ac).clamp(min=1e-8)
-
     def set_timesteps(self, num_inference_steps: int, device: Union[str, torch.device] = "cpu") -> torch.Tensor:
-        """Tập con giảm dần, cách đều, của các timestep lúc train (cho DDIM)."""
+        """Tập con giảm dần, cách đều, của các timestep lúc train."""
         if num_inference_steps > self.num_train_timesteps:
             raise ValueError("num_inference_steps phải <= num_train_timesteps")
         step_ratio = self.num_train_timesteps // num_inference_steps
         timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].astype(np.int64).copy()
         return torch.from_numpy(timesteps).to(device=device, dtype=torch.long)
-
-
-def min_snr_weights(snr: torch.Tensor, gamma: float) -> torch.Tensor:
-    """Trọng số Min-SNR-gamma cho epsilon-prediction: w = min(SNR(t), gamma) / SNR(t)."""
-    return torch.clamp(snr, max=gamma) / snr.clamp(min=1e-8)
 
 
 def randn_tensor(
@@ -102,51 +83,60 @@ def randn_tensor(
 
 
 @torch.no_grad()
-def ddim_step(
+def dpm_solver_2m_step(
     scheduler: NoiseScheduler,
     model_output: torch.Tensor,
-    timestep: Union[int, torch.Tensor],
-    prev_timestep: Union[int, torch.Tensor],
+    t: int,
+    s: int,
+    r_t: Optional[int],
     sample: torch.Tensor,
-    eta: float = 0.0,
-    generator: Optional[torch.Generator] = None,
-) -> torch.Tensor:
-    """Một bước ngược DDIM (eta=0 là tất định), tham số hóa epsilon-prediction."""
+    x0_pred_prev: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Một bước ngược DPM-Solver++ 2M, tham số hóa data-prediction."""
     device, dtype = sample.device, sample.dtype
-    t = int(timestep)
-    t_prev = int(prev_timestep)
 
     ac_t = scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)[t]
-    ac_prev = (
-        scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)[t_prev]
-        if t_prev >= 0
+    ac_s = (
+        scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)[s]
+        if s >= 0
         else torch.tensor(1.0, device=device, dtype=torch.float32)
     )
 
-    # Tính ở fp32 rồi mới trả về dtype gốc, tránh mất chính xác khi chạy fp16.
+    alpha_t, sigma_t = ac_t.sqrt(), (1.0 - ac_t).sqrt()
+    alpha_s, sigma_s = ac_s.sqrt(), (1.0 - ac_s).sqrt()
+
+    lambda_t = torch.log(alpha_t / sigma_t)
+    lambda_s = torch.log(alpha_s / sigma_s)
+    h = lambda_s - lambda_t
+
+    # Chuyển đổi epsilon-prediction thành data-prediction (x_0)
     x = sample.float()
     eps = model_output.float()
+    x0_pred = (x - sigma_t * eps) / alpha_t
 
-    pred_x0 = (x - (1.0 - ac_t).sqrt() * eps) / ac_t.sqrt()
+    # Fallback về bậc 1 (Euler) nếu chưa có lịch sử
+    if x0_pred_prev is None or r_t is None:
+        x_prev = alpha_s * x0_pred + sigma_s * eps
+        return x_prev.to(dtype), x0_pred
 
-    sigma_t = torch.tensor(0.0, device=device, dtype=torch.float32)
-    if eta > 0:
-        sigma_t = eta * (((1.0 - ac_prev) / (1.0 - ac_t)) * (1.0 - ac_t / ac_prev)).clamp(min=0.0).sqrt()
+    # Xấp xỉ bậc 2 (DPM-Solver++ 2M)
+    ac_r = scheduler.alphas_cumprod.to(device=device, dtype=torch.float32)[r_t]
+    alpha_r, sigma_r = ac_r.sqrt(), (1.0 - ac_r).sqrt()
+    lambda_r = torch.log(alpha_r / sigma_r)
 
-    dir_coeff = (1.0 - ac_prev - sigma_t**2).clamp(min=0.0).sqrt()
-    x_prev = ac_prev.sqrt() * pred_x0 + dir_coeff * eps
+    h_old = lambda_t - lambda_r
+    r = h / h_old
 
-    if eta > 0:
-        noise = randn_tensor(sample.shape, generator, device, torch.float32)
-        x_prev = x_prev + sigma_t * noise
+    # Ngoại suy x_0 và cập nhật nghiệm
+    x0_pred_hat = x0_pred + 0.5 * r * (x0_pred - x0_pred_prev)
+    x_prev = alpha_s * x0_pred_hat + sigma_s * eps
 
-    return x_prev.to(dtype)
+    return x_prev.to(dtype), x0_pred
 
 
 # --------------------------------------------------------------------------
 # Text conditioning / CFG
 # --------------------------------------------------------------------------
-
 
 @torch.no_grad()
 def encode_prompt(
@@ -156,13 +146,6 @@ def encode_prompt(
     negative_prompts: Optional[List[str]],
     device: Union[str, torch.device],
 ) -> torch.Tensor:
-    """
-    Token hóa + encode prompt. Nếu có negative prompt thì trả về [uncond; cond].
-
-    Cố ý KHÔNG truyền attention_mask: CLIP của SD được huấn luyện trên toàn bộ chuỗi
-    đã pad (chỉ dùng causal mask), truyền thêm padding mask sẽ ra embedding khác với
-    lúc train.
-    """
     def _encode(texts: List[str]) -> torch.Tensor:
         tokens = tokenizer(
             texts,
@@ -182,10 +165,9 @@ def encode_prompt(
 
 @torch.no_grad()
 def decode_latents(vae, latents: torch.Tensor) -> List[Image.Image]:
-    """Gỡ scale 0.18215, decode theo đúng dtype của VAE, xuất PIL."""
     vae_dtype = next(vae.parameters()).dtype
     latents = (latents / VAE_SCALING_FACTOR).to(dtype=vae_dtype)
-    pixel_values = vae.decode(latents).sample  # (B, 3, H, W)
+    pixel_values = vae.decode(latents).sample
     pixel_values = (pixel_values.float() / 2.0 + 0.5).clamp(0.0, 1.0)
     pixel_values = pixel_values.cpu().permute(0, 2, 3, 1).numpy()
     images = (pixel_values * 255.0).round().astype("uint8")
@@ -195,7 +177,6 @@ def decode_latents(vae, latents: torch.Tensor) -> List[Image.Image]:
 # --------------------------------------------------------------------------
 # Vòng lặp sinh ảnh
 # --------------------------------------------------------------------------
-
 
 @dataclass
 class SDComponents:
@@ -213,15 +194,13 @@ def sample(
     num_images: int = 1,
     height: int = 512,
     width: int = 512,
-    num_inference_steps: int = 50,
+    num_inference_steps: int = 25,   
     guidance_scale: float = 7.5,
-    eta: float = 0.0,
     generator: Optional[torch.Generator] = None,
     device: Union[str, torch.device] = "cuda",
     dtype: Optional[torch.dtype] = None,
     scheduler: Optional[NoiseScheduler] = None,
 ) -> List[Image.Image]:
-    """Vòng lặp DDIM + classifier-free guidance độc lập với Diffusers pipeline."""
     unet, vae, text_encoder, tokenizer = (
         components.unet, components.vae, components.text_encoder, components.tokenizer,
     )
@@ -249,6 +228,9 @@ def sample(
     )
     timesteps = scheduler.set_timesteps(num_inference_steps, device=device)
 
+    x0_pred_prev = None
+    r_t = None
+
     for i, t in enumerate(timesteps):
         latent_input = torch.cat([latents, latents], dim=0) if do_cfg else latents
         t_batch = t.expand(latent_input.shape[0])
@@ -260,6 +242,10 @@ def sample(
             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
         prev_t = int(timesteps[i + 1]) if i + 1 < len(timesteps) else -1
-        latents = ddim_step(scheduler, noise_pred, int(t), prev_t, latents, eta=eta, generator=generator)
+        
+        latents, x0_pred_prev = dpm_solver_2m_step(
+            scheduler, noise_pred, int(t), prev_t, r_t, latents, x0_pred_prev
+        )
+        r_t = int(t)
 
     return decode_latents(vae, latents)
