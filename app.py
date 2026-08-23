@@ -1,13 +1,8 @@
 """
-Gradio demo cho C-DM: sinh ảnh X-quang ngực từ Stable Diffusion 1.x thuần PyTorch
-kèm adapter LoRA (DreamBooth multi-concept).
-
 Chạy:
     python app.py                                   # dùng ./sd15 + checkpoint-4000.safetensors
     python app.py --lora ""                         # chỉ base model, không LoRA
 
-LoRA trong repo được train trên SD 1.5 (cross_attention_dim=768), nên base model
-phải cùng họ SD 1.x — xem `_check_lora_compatible`.
 """
 
 import argparse
@@ -74,7 +69,8 @@ class Demo:
     def _load_lora(self, lora_path: str, lora_config_path: Optional[str]) -> None:
         cfg = _resolve_lora_config(lora_path, lora_config_path)
         _check_lora_compatible(lora_path, self.components.unet)
-        print(f"[app] inject LoRA rank={cfg.rank} alpha={cfg.alpha} targets={list(cfg.target_modules)}")
+        print(f"[app] inject LoRA rank={cfg.rank} alpha={cfg.alpha} "
+              f"| {len(cfg.target_modules)} module đích")
         self.injected = inject_lora(
             self.components.unet, cfg.target_modules, cfg.rank, cfg.alpha, dropout=0.0
         )
@@ -93,10 +89,6 @@ class Demo:
 
 
 def _check_lora_compatible(lora_path: str, unet) -> None:
-    """
-    LoRA chỉ khớp base model cùng `cross_attention_dim`. Bắt lỗi sớm với thông báo
-    dễ hiểu thay vì để shape mismatch nổ giữa lúc nạp trọng số.
-    """
     from safetensors import safe_open
 
     key = "down_blocks.0.attentions.0.transformer_blocks.0.attn2.to_k.lora_a"
@@ -117,35 +109,25 @@ def _check_lora_compatible(lora_path: str, unet) -> None:
         )
 
 
-def _resolve_lora_config(lora_path: str, lora_config_path: Optional[str]) -> LoRAConfig:
-    """Ưu tiên file lora_config.json; nếu không có thì đọc metadata trong safetensors."""
+def _resolve_lora_config(lora_path: str, lora_config_path: Optional[str] = None) -> LoRAConfig:
     if lora_config_path and os.path.isfile(lora_config_path):
         return load_lora_config(lora_config_path)
-
-    sibling = os.path.join(os.path.dirname(os.path.abspath(lora_path)), "lora_config.json")
-    if os.path.isfile(sibling):
-        return load_lora_config(sibling)
 
     from safetensors import safe_open
 
     with safe_open(lora_path, framework="pt") as f:
         meta = f.metadata() or {}
-        keys = list(f.keys())
-    if "rank" not in meta:
-        raise ValueError(
-            f"Không tìm thấy lora_config.json cạnh '{lora_path}' và checkpoint cũng "
-            "không có metadata rank/alpha — hãy truyền --lora_config."
-        )
-    # Suy ra target_modules từ tên key: "<path>.<target>.lora_a"
-    targets = sorted({k.rsplit(".", 1)[0].split(".attn", 1)[-1].split(".", 1)[-1]
-                      for k in keys if k.endswith(".lora_a")})
-    targets = sorted({t for t in targets if t})
-    return LoRAConfig(
-        rank=int(meta["rank"]),
-        alpha=float(meta.get("alpha", meta["rank"])),
-        target_modules=targets or ["to_q", "to_k", "to_v", "to_out.0"],
-        dropout=0.0,
-    )
+        targets = sorted(k[: -len(".lora_a")] for k in f.keys() if k.endswith(".lora_a"))
+        if not targets:
+            raise ValueError(
+                f"'{lora_path}' không chứa key LoRA nào (*.lora_a) — "
+                "đây có phải file trọng số LoRA không?"
+            )
+        rank_from_shape = f.get_slice(targets[0] + ".lora_a").get_shape()[0]
+
+    rank = int(meta.get("rank", rank_from_shape))
+    alpha = float(meta.get("alpha", rank))
+    return LoRAConfig(rank=rank, alpha=alpha, target_modules=targets, dropout=0.0)
 
 
 def load_prompt_presets(path: str) -> List[str]:
@@ -219,7 +201,6 @@ def build_ui(demo_state: Demo, presets: List[str]) -> gr.Blocks:
         gr.Markdown(
             "# C-DM — Chest X-ray Diffusion (SD 1.x thuần PyTorch + LoRA)\n"
             "Sinh ảnh X-quang ngực bằng DPM-Solver++ 2M. "
-            "**Ảnh là dữ liệu tổng hợp, không dùng cho mục đích chẩn đoán y tế.**"
         )
 
         with gr.Row():
@@ -232,7 +213,6 @@ def build_ui(demo_state: Demo, presets: List[str]) -> gr.Blocks:
                 )
                 negative_prompt = gr.Textbox(
                     label="Negative prompt",
-                    value="blurry, artifact, low quality, text, watermark",
                     lines=2,
                 )
                 gr.Examples(examples=[[p] for p in presets], inputs=[prompt], label="Concept đã train")
@@ -282,7 +262,9 @@ def parse_args() -> argparse.Namespace:
                    help="Thư mục base model SD 1.x theo cấu trúc HF (cross_attention_dim=768)")
     p.add_argument("--lora", default=os.path.join(root, "checkpoint-4000.safetensors"),
                    help="File trọng số LoRA (.safetensors); '' để chạy base model")
-    p.add_argument("--lora_config", default=os.path.join(root, "lora_config.json"))
+    p.add_argument("--lora_config", default=None,
+                   help="Ghi đè cấu hình LoRA bằng file json; mặc định đọc thẳng "
+                        "metadata trong file .safetensors")
     p.add_argument("--concepts", default=os.path.join(root, "concepts.json"))
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--dtype", default="fp16", choices=["fp16", "fp32"])
@@ -312,7 +294,7 @@ def main() -> None:
         server_port=args.port,
         share=args.share,
         show_error=True,
-        css=CSS,          # Gradio 6: css thuộc launch(), không còn ở Blocks()
+        css=CSS,        
     )
 
 
