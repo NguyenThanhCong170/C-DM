@@ -1,8 +1,8 @@
 # C-DM — Chest X-ray Generation with Stable Diffusion in Pure PyTorch
 
 Stable Diffusion 1.5 + LoRA (multi-concept DreamBooth) for 5 lung conditions on the NIH
-ChestX-ray14 dataset. The entire architecture (U-Net, VAE, CLIP text encoder, tokenizer,
-DPM-Solver++ 2M sampler) is reimplemented in raw `torch` — **no `diffusers` or `transformers`**.
+ChestX-ray14 dataset. The entire architecture includes U-Net, VAE, CLIP text encoder, tokenizer,
+DPM-Solver++ 2M sampler.
 
 ---
 
