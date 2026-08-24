@@ -225,7 +225,7 @@ def build_ui(demo_state: Demo, presets: List[str]) -> gr.Blocks:
                     with gr.Row():
                         height = gr.Slider(256, 768, value=512, step=64, label="Chiều cao")
                         width = gr.Slider(256, 768, value=512, step=64, label="Chiều rộng")
-                    num_images = gr.Slider(1, 4, value=1, step=1, label="Số ảnh")
+                    num_images = gr.Slider(1, 25, value=1, step=1, label="Số ảnh")
                     lora_strength = gr.Slider(
                         0.0, 1.5, value=1.0, step=0.05,
                         label="Cường độ LoRA (0 = chỉ base model)",
@@ -238,7 +238,7 @@ def build_ui(demo_state: Demo, presets: List[str]) -> gr.Blocks:
             with gr.Column(scale=4):
                 gallery = gr.Gallery(
                     label="Kết quả", columns=2, height=560,
-                    object_fit="contain", elem_classes=["gallery"],
+                    object_fit="contain", elem_classes=["gallery"],format="png",
                 )
                 info = gr.Markdown()
 
