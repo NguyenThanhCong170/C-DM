@@ -37,6 +37,7 @@ C-DM/
 ├── sd15/                          # SD 1.5 base model (cross_attention_dim = 768), downloaded by you
 ├── checkpoint-4000.safetensors    # LoRA, rank 16, 4000 steps — included in the repo
 ├── concepts.json                  # concept definitions, only needed for retraining
+├── config/training.yaml           # training settings, only needed for retraining
 └── app.py
 ```
 
@@ -45,6 +46,11 @@ C-DM/
 ## Generating images
 
 ### Web UI
+Using Gradio to deloy model
+
+```bash
+pip install gradio
+```
 
 ```bash
 python app.py
@@ -104,26 +110,16 @@ imgs[0].save("out.png")
 
 ## Retraining
 
+Training is driven by a YAML config instead of command-line flags:
+
 ```bash
-python train.py \
-  --pretrained_model_name_or_path ./sd15 \
-  --variant fp16 \
-  --concepts_list concepts.json \
-  --class_data_dir ./data/class_no_finding \
-  --with_prior_preservation --prior_loss_weight 1.0 \
-  --output_dir ./out/lora \
-  --rank 16 --lora_alpha 16 \
-  --max_train_steps 4000 \
-  --train_batch_size 1 --gradient_accumulation_steps 8 \
-  --learning_rate 1e-4 --lr_scheduler cosine --lr_warmup_steps 200 \
-  --snr_gamma 5.0 \
-  --mixed_precision fp16 --gradient_checkpointing \
-  --checkpointing_steps 500 \
-  --validation_prompt "a chest x-ray of sks pneumonia" --validation_steps 250
+python train.py                              # reads config/training.yaml
+python train.py --config my_experiment.yaml  # or point it anywhere
 ```
 
-This is the exact configuration that produced `checkpoint-4000.safetensors` (5×1000 disease
-images plus 1000 "No Finding" images for prior preservation, ~4h on a Tesla T4).
+`config/training.yaml` holds the settings that produced `checkpoint-4000.safetensors`
+(5×1000 disease images plus 1000 "No Finding" images for prior preservation, ~4h on a Tesla T4):
+
 
 `concepts.json` declares the 5 concepts, with paths relative to the repo root. Image data
 (`data/`) is not included in the repo — download NIH ChestX-ray14 and preprocess it to
