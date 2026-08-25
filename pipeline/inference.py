@@ -68,6 +68,23 @@ class NoiseScheduler:
         timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].astype(np.int64).copy()
         return torch.from_numpy(timesteps).to(device=device, dtype=torch.long)
 
+    def add_noise(self, x0: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+        """z_t = sqrt(alpha_bar_t) z0 + sqrt(1 - alpha_bar_t) eps, batch theo `timesteps`."""
+        ac = self.alphas_cumprod.to(device=x0.device, dtype=torch.float32)[timesteps]
+        while ac.dim() < x0.dim():
+            ac = ac.unsqueeze(-1)
+        return (ac.sqrt() * x0.float() + (1 - ac).sqrt() * noise.float()).to(x0.dtype)
+
+    def compute_snr(self, timesteps: torch.Tensor) -> torch.Tensor:
+        """SNR(t) = alpha_bar_t / (1 - alpha_bar_t), dùng cho Min-SNR weighting."""
+        ac = self.alphas_cumprod.to(device=timesteps.device, dtype=torch.float32)[timesteps]
+        return ac / (1.0 - ac).clamp(min=1e-8)
+
+
+def min_snr_weights(snr: torch.Tensor, gamma: float) -> torch.Tensor:
+    """Trọng số Min-SNR-gamma cho epsilon-prediction: w = min(SNR(t), gamma) / SNR(t)."""
+    return torch.clamp(snr, max=gamma) / snr.clamp(min=1e-8)
+
 
 def randn_tensor(
     shape,
@@ -133,9 +150,6 @@ def dpm_solver_2m_step(
 
     # Cập nhật nghiệm theo đúng công thức bậc 2:
     #     x_s = (sigma_s/sigma_t)·x_t − alpha_s·(e^(−h) − 1)·D
-    # KHÔNG dùng dạng DDIM `alpha_s·D + sigma_s·eps`: hai vế chỉ bằng nhau khi
-    # D == x0_pred (tức bậc 1). Ở bậc 2 nó thiếu hạng (alpha_t·sigma_s/sigma_t)·(x0_pred − D),
-    # sai số tích lũy qua từng bước làm ảnh bị gắt và cháy tương phản.
     x_prev = (sigma_s / sigma_t) * x - alpha_s * (torch.exp(-h) - 1.0) * x0_pred_hat
 
     return x_prev.to(dtype), x0_pred

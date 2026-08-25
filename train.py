@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import yaml 
 import json
 import math
 import random
@@ -38,80 +39,112 @@ from pipeline.inference import (
 # --------------------------------------------------------------------------
 
 
-def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-
-    # Backbone
-    p.add_argument("--pretrained_model_name_or_path", type=str, required=True,
-                   help="THƯ MỤC local chứa checkpoint theo bố cục diffusers "
-                        "(unet/, vae/, text_encoder/, tokenizer/, scheduler/).")
-    p.add_argument("--revision", type=str, default=None)
-    p.add_argument("--variant", type=str, default=None,
-                   help="Hậu tố file trọng số, ví dụ 'fp16'.")
-
-    # Dữ liệu
-    p.add_argument("--concepts_list", type=str, default=None,
-                   help="File JSON chứa danh sách multi-concept.")
-    p.add_argument("--instance_data_dir", type=str, default=None)
-    p.add_argument("--instance_prompt", type=str, default=None)
-    p.add_argument("--class_data_dir", type=str, default=None)
-    p.add_argument("--class_prompt", type=str, default="a chest x-ray")
-    p.add_argument("--with_prior_preservation", action="store_true")
-    p.add_argument("--prior_loss_weight", type=float, default=1.0)
-    p.add_argument("--resolution", type=int, default=512)
-    p.add_argument("--random_flip", action="store_true",
-                   help="KHÔNG khuyến nghị với X-quang ngực (lật ngang làm sai vị trí tim).")
-    p.add_argument("--dataloader_num_workers", type=int, default=2)
-
+# Giá trị mặc định cho mọi khoá YAML có thể bỏ trống.
+# YAML chỉ cần ghi những gì muốn ghi đè.
+DEFAULTS: Dict[str, object] = {
+    # Model
+    "revision": None,
+    "variant": None,
     # LoRA
-    p.add_argument("--rank", type=int, default=64)
-    p.add_argument("--lora_alpha", type=float, default=64.0)
-    p.add_argument("--lora_dropout", type=float, default=0.0)
-    p.add_argument("--target_modules", type=str, nargs="+", default=list(DEFAULT_TARGET_MODULES))
+    "rank": 64,
+    "lora_alpha": 64.0,
+    "lora_dropout": 0.0,
+    "target_modules": list(DEFAULT_TARGET_MODULES),
+    "resume_from_checkpoint": None,
+    # Dataset
+    "concepts_list": None,
+    "instance_data_dir": None,
+    "instance_prompt": None,
+    "class_data_dir": None,
+    "class_prompt": "a chest x-ray",
+    "with_prior_preservation": False,
+    "prior_loss_weight": 1.0,
+    "resolution": 512,
+    "random_flip": False,
+    "dataloader_num_workers": 2,
+    # Optimizer
+    "learning_rate": 1e-4,
+    "use_8bit_adam": False,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_weight_decay": 1e-2,
+    "adam_epsilon": 1e-8,
+    "max_grad_norm": 1.0,
+    "lr_scheduler": "constant",
+    "lr_warmup_steps": 0,
+    # Training
+    "seed": 42,
+    "max_train_steps": 2500,
+    "train_batch_size": 2,
+    "gradient_accumulation_steps": 2,
+    "gradient_checkpointing": False,
+    "mixed_precision": "fp16",
+    "snr_gamma": 5.0,
+    # Logging / checkpoint / validation
+    "logging_steps": 10,
+    "checkpointing_steps": 500,
+    "validation_prompt": None,
+    "validation_negative_prompt": "",
+    "validation_steps": 250,
+    "validation_inference_steps": 30,
+    "num_validation_images": 2,
+}
 
-    # Diffusion / loss
-    p.add_argument("--snr_gamma", type=float, default=5.0,
-                   help="Min-SNR-gamma weighting (Hang et al.). <=0 để tắt.")
 
-    # Tối ưu
-    p.add_argument("--train_batch_size", type=int, default=2)
-    p.add_argument("--gradient_accumulation_steps", type=int, default=2)
-    p.add_argument("--max_train_steps", type=int, default=2500)
-    p.add_argument("--learning_rate", type=float, default=1e-4)
-    p.add_argument("--lr_scheduler", type=str, default="constant",
-                   choices=["constant", "linear", "cosine"])
-    p.add_argument("--lr_warmup_steps", type=int, default=0)
-    p.add_argument("--use_8bit_adam", action="store_true")
-    p.add_argument("--adam_beta1", type=float, default=0.9)
-    p.add_argument("--adam_beta2", type=float, default=0.999)
-    p.add_argument("--adam_weight_decay", type=float, default=1e-2)
-    p.add_argument("--adam_epsilon", type=float, default=1e-8)
-    p.add_argument("--max_grad_norm", type=float, default=1.0)
-    p.add_argument("--gradient_checkpointing", action="store_true")
+def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", type=str, default="config/training.yaml")
 
-    # Precision / device
-    p.add_argument("--mixed_precision", type=str, default="fp16", choices=["no", "fp16", "bf16"])
-    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    cli_args = p.parse_args(argv)
 
-    # Output / logging
-    p.add_argument("--output_dir", type=str, required=True)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--logging_steps", type=int, default=10)
-    p.add_argument("--checkpointing_steps", type=int, default=500)
-    p.add_argument("--resume_from_checkpoint", type=str, default=None)
-    p.add_argument("--validation_prompt", type=str, default=None)
-    p.add_argument("--validation_negative_prompt", type=str, default="")
-    p.add_argument("--num_validation_images", type=int, default=2)
-    p.add_argument("--validation_steps", type=int, default=250)
-    p.add_argument("--validation_inference_steps", type=int, default=30)
+    config_path = Path(cli_args.config)
+    if not config_path.is_file():
+        p.error(f"Không tìm thấy file config: {config_path}")
 
-    args = p.parse_args(argv)
-    if args.concepts_list is None and (args.instance_data_dir is None or args.instance_prompt is None):
-        p.error("Bắt buộc cung cấp --concepts_list hoặc cả (--instance_data_dir, --instance_prompt).")
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+
+    unknown = sorted(set(config) - set(DEFAULTS) - {"output_dir", "pretrained_model_name_or_path",
+                                                    "device"})
+    if unknown:
+        print(f"[warn] khoá lạ trong {config_path} (bị bỏ qua): {', '.join(unknown)}")
+
+    merged = {**DEFAULTS, **config}
+    args = argparse.Namespace(**merged)
+
+    if not hasattr(args, "pretrained_model_name_or_path"):
+        p.error(f"{config_path} thiếu 'pretrained_model_name_or_path'.")
+    if not hasattr(args, "output_dir"):
+        p.error(f"{config_path} thiếu 'output_dir'.")
+
+    args.device = getattr(
+        args,
+        "device",
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    # Validation
+    if args.concepts_list is None and (
+        args.instance_data_dir is None or args.instance_prompt is None
+    ):
+        p.error(
+            "Bắt buộc cung cấp 'concepts_list' "
+            "hoặc cả ('instance_data_dir', 'instance_prompt') trong config."
+        )
+
     if args.with_prior_preservation and not args.class_data_dir:
-        p.error("--with_prior_preservation cần --class_data_dir.")
-    if args.mixed_precision == "bf16" and args.device == "cuda" and not torch.cuda.is_bf16_supported():
-        p.error("GPU hiện tại không hỗ trợ bf16 (ví dụ T4) — dùng --mixed_precision fp16.")
+        p.error("'with_prior_preservation: true' cần 'class_data_dir'.")
+
+    if (
+        args.mixed_precision == "bf16"
+        and args.device == "cuda"
+        and not torch.cuda.is_bf16_supported()
+    ):
+        p.error(
+            "GPU hiện tại không hỗ trợ bf16 "
+            "(ví dụ T4) — dùng --mixed_precision fp16."
+        )
+
     return args
 
 
@@ -273,12 +306,22 @@ def run_training(args, tokenizer, text_encoder, vae, unet, noise_scheduler: Nois
     output_dir.mkdir(parents=True, exist_ok=True)
 
     freeze_backbone(vae, text_encoder, unet)
-    vae.to(device)
-    text_encoder.to(device)
-    unet.to(device)
 
-    if args.gradient_checkpointing and hasattr(unet, "enable_gradient_checkpointing"):
-        unet.enable_gradient_checkpointing()
+    # Backbone đóng băng → giữ ở amp_dtype cho nhẹ VRAM. Phải cast TRƯỚC inject_lora
+    # để adapter (luôn tạo ở fp32) không bị hạ theo. VAE ở lại fp32 vì `vae.encode`
+    # được gọi ngoài autocast với pixel_values fp32.
+    vae.to(device)
+    text_encoder.to(device, dtype=amp_dtype if use_amp else None)
+    unet.to(device, dtype=amp_dtype if use_amp else None)
+    if use_amp:
+        print(f"[mem] backbone đóng băng ở {amp_dtype} (VAE giữ fp32), LoRA ở fp32")
+
+    if args.gradient_checkpointing:
+        if hasattr(unet, "enable_gradient_checkpointing"):
+            unet.enable_gradient_checkpointing()
+        else:
+            print("[warn] 'gradient_checkpointing: true' nhưng models/unet.py chưa hỗ trợ "
+                  "— BỎ QUA. VRAM sẽ cao hơn dự kiến.")
 
     # 1. Tiêm LoRA (adapter tự tạo trên device của layer gốc)
     print("[lora] injecting adapters ...")
