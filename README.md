@@ -114,7 +114,6 @@ Training is driven by a YAML config instead of command-line flags:
 
 ```bash
 python train.py                              # reads config/training.yaml
-python train.py --config my_experiment.yaml  # or point it anywhere
 ```
 
 `config/training.yaml` holds the settings that produced `checkpoint-4000.safetensors`
