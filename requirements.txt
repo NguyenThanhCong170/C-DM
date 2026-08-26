@@ -5,6 +5,7 @@ safetensors>=0.4
 Pillow
 numpy
 regex
+pyyaml
 
 # Demo web
 gradio>=5
