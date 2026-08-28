@@ -154,6 +154,17 @@ def main() -> int:
         ok(f"nạp xong trong {time.time() - t0:.1f}s | cross_attention_dim="
            f"{unet.config.cross_attention_dim} | schedule={sched.beta_schedule}")
 
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        amp_dtype = {"no": torch.float32, "fp16": torch.float16,
+                     "bf16": torch.bfloat16}[mp]
+        use_amp = mp != "no" and device == "cuda"
+
+        # Cast TRƯỚC khi inject: adapter luôn tạo ở fp32, nếu cast sau thì
+        # .to(dtype=fp16) hạ luôn lora_a/lora_b và GradScaler.unscale_ sẽ ném
+        # "Attempting to unscale FP16 gradients".
+        vae.to(device)                                   # VAE giữ fp32
+        unet.to(device, dtype=amp_dtype if use_amp else None)
+
         targets = (["attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0"]
                    if cfg.get("cross_attention_only") else
                    cfg.get("target_modules", ["to_q", "to_k", "to_v", "to_out.0"]))
@@ -181,15 +192,13 @@ def main() -> int:
             import torch.nn.functional as F
             from pipeline.inference import VAE_SCALING_FACTOR, min_snr_weights
 
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            amp_dtype = {"no": torch.float32, "fp16": torch.float16,
-                         "bf16": torch.bfloat16}[mp]
-            use_amp = mp != "no" and device == "cuda"
-            vae.to(device)
-            unet.to(device, dtype=amp_dtype if use_amp else None)
             enc.to(device, dtype=torch.float32)
 
             params = lora_parameters(inj) + list(enc.parameters())
+            bad = {p.dtype for p in params} - {torch.float32}
+            if bad:
+                raise Fail(f"tham số train phải ở fp32, đang có {bad}. "
+                           "Kiểm tra thứ tự: phải .to(dtype) TRƯỚC inject_lora.")
             optim = torch.optim.AdamW(params, lr=1e-4)
             scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
             if device == "cuda":
