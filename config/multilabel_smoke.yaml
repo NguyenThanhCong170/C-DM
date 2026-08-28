@@ -1,0 +1,48 @@
+# ============================================================================
+# Chạy thử NHANH trên dữ liệu thật — dùng để kiểm tra đường dẫn, VRAM và tốc độ
+# TRƯỚC khi bắt đầu run 20k step.  ~2–4 phút trên 1 GPU T4.
+#   python train_multilabel.py --config config/multilabel_smoke.yaml
+# ============================================================================
+
+pretrained_model_name_or_path: "./sd15"
+variant: "fp16"
+output_dir: "./out/smoke"
+
+rank: 128
+lora_alpha: 128
+cross_attention_only: true
+
+tokens_per_label: 2
+label_encoder_layers: 2
+label_encoder_heads: 8
+label_encoder_lr: 0.0001
+cond_dropout_prob: 0.1
+
+data_root: "./data/nih"
+resolution: 512
+view_position: "PA"
+max_images: 400              # chỉ lấy 400 ảnh cho nhanh
+cache_dir: "./cache512"
+val_ratio: 0.0
+balance_beta: 0.5
+dataloader_num_workers: 2
+
+learning_rate: 0.0001
+lr_warmup_steps: 5
+max_train_steps: 30
+train_batch_size: 2
+gradient_accumulation_steps: 1
+gradient_checkpointing: true
+mixed_precision: "fp16"
+snr_gamma: 5.0
+
+logging_steps: 5
+checkpointing_steps: 30
+validation_steps: 15
+validation_inference_steps: 20
+validation_guidance_scale: 4.0
+validation_labels:
+  - ["No Finding"]
+  - ["Effusion", "Atelectasis"]
+
+wandb_project: null        # chạy thử thì không cần log lên wandb

@@ -21,6 +21,16 @@ from .loading import (
     load_unet,
     load_vae,
 )
+from .label_encoder import (
+    DEFAULT_LABELS,
+    LabelEncoderConfig,
+    MultiHotLabelEncoder,
+    batch_multihot,
+    labels_to_multihot,
+    load_label_encoder,
+    load_label_encoder_into,
+    save_label_encoder,
+)
 from .text_encoder import CLIPTextModel
 from .tokenizer import CLIPTokenizer
 from .unet import UNet2DConditionModel
@@ -32,6 +42,10 @@ __all__ = [
     "inject_lora", "lora_parameters", "num_trainable_parameters",
     "save_lora_config", "load_lora_config", "save_lora_weights", "load_lora_weights_into",
     "merge_and_unload",
+    # Điều kiện bằng nhãn multi-hot
+    "MultiHotLabelEncoder", "LabelEncoderConfig", "DEFAULT_LABELS",
+    "save_label_encoder", "load_label_encoder", "load_label_encoder_into",
+    "labels_to_multihot", "batch_multihot",
     # Kiến trúc
     "UNet2DConditionModel", "AutoencoderKL", "CLIPTextModel", "CLIPTokenizer",
     # Nạp checkpoint

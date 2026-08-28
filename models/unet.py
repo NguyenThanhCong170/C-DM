@@ -80,6 +80,24 @@ def get_timestep_embedding(
     return emb
 
 
+# --------------------------------------------------------------------------
+# Gradient checkpointing
+# --------------------------------------------------------------------------
+
+def _maybe_ckpt(enabled: bool, fn, *inputs):
+    """
+    Chạy `fn(*inputs)` qua torch.utils.checkpoint khi bật gradient checkpointing.
+
+    use_reentrant=False là bắt buộc ở đây: bản reentrant cũ yêu cầu ít nhất một
+    input requires_grad, mà khi backbone đóng băng (chỉ LoRA học) điều đó không
+    luôn đúng ở mọi block — gradient sẽ âm thầm biến mất thay vì báo lỗi.
+    """
+    if enabled and torch.is_grad_enabled():
+        from torch.utils.checkpoint import checkpoint
+        return checkpoint(fn, *inputs, use_reentrant=False)
+    return fn(*inputs)
+
+
 class TimestepEmbedding(nn.Module):
     def __init__(self, in_channels: int, time_embed_dim: int, act_fn: str = "silu"):
         super().__init__()
@@ -413,10 +431,13 @@ class CrossAttnDownBlock2D(nn.Module):
         temb: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        gc_on = getattr(self, "gradient_checkpointing", False)
         output_states = ()
         for resnet, attn in zip(self.resnets, self.attentions):
-            hidden_states = resnet(hidden_states, temb)
-            hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states)
+            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
+            hidden_states = _maybe_ckpt(
+                gc_on, lambda h, c, _a=attn: _a(h, encoder_hidden_states=c),
+                hidden_states, encoder_hidden_states)
             output_states = output_states + (hidden_states,)
 
         if self.downsamplers is not None:
@@ -447,9 +468,10 @@ class DownBlock2D(nn.Module):
         ]) if add_downsample else None
 
     def forward(self, hidden_states: torch.Tensor, temb: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        gc_on = getattr(self, "gradient_checkpointing", False)
         output_states = ()
         for resnet in self.resnets:
-            hidden_states = resnet(hidden_states, temb)
+            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
             output_states = output_states + (hidden_states,)
 
         if self.downsamplers is not None:
@@ -491,9 +513,12 @@ class UNetMidBlock2DCrossAttn(nn.Module):
         temb: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.resnets[0](hidden_states, temb)
-        hidden_states = self.attentions[0](hidden_states, encoder_hidden_states=encoder_hidden_states)
-        hidden_states = self.resnets[1](hidden_states, temb)
+        gc_on = getattr(self, "gradient_checkpointing", False)
+        hidden_states = _maybe_ckpt(gc_on, self.resnets[0], hidden_states, temb)
+        hidden_states = _maybe_ckpt(
+            gc_on, lambda h, c: self.attentions[0](h, encoder_hidden_states=c),
+            hidden_states, encoder_hidden_states)
+        hidden_states = _maybe_ckpt(gc_on, self.resnets[1], hidden_states, temb)
         return hidden_states
 
 
@@ -547,12 +572,15 @@ class CrossAttnUpBlock2D(nn.Module):
         temb: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        gc_on = getattr(self, "gradient_checkpointing", False)
         for resnet, attn in zip(self.resnets, self.attentions):
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
-            hidden_states = resnet(hidden_states, temb)
-            hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states)
+            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
+            hidden_states = _maybe_ckpt(
+                gc_on, lambda h, c, _a=attn: _a(h, encoder_hidden_states=c),
+                hidden_states, encoder_hidden_states)
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
@@ -593,11 +621,12 @@ class UpBlock2D(nn.Module):
         res_hidden_states_tuple: Tuple[torch.Tensor, ...],
         temb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        gc_on = getattr(self, "gradient_checkpointing", False)
         for resnet in self.resnets:
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
-            hidden_states = resnet(hidden_states, temb)
+            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
@@ -760,6 +789,26 @@ class UNet2DConditionModel(nn.Module):
         self.conv_norm_out = nn.GroupNorm(norm_num_groups, block_out_channels[0], eps=norm_eps)
         self.conv_act = nn.SiLU()
         self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
+
+    # ------------------------------------------------------------------
+    # Gradient checkpointing: đánh đổi ~30% tốc độ lấy ~40-50% VRAM.
+    # Chỉ bật khi train; lúc suy diễn (no_grad) helper tự bỏ qua.
+    # ------------------------------------------------------------------
+    _CKPT_BLOCKS = (
+        "CrossAttnDownBlock2D", "DownBlock2D",
+        "UNetMidBlock2DCrossAttn", "CrossAttnUpBlock2D", "UpBlock2D",
+    )
+
+    def enable_gradient_checkpointing(self, value: bool = True) -> None:
+        n = 0
+        for module in self.modules():
+            if type(module).__name__ in self._CKPT_BLOCKS:
+                module.gradient_checkpointing = bool(value)
+                n += 1
+        print(f"[unet] gradient checkpointing {'BẬT' if value else 'TẮT'} trên {n} block")
+
+    def disable_gradient_checkpointing(self) -> None:
+        self.enable_gradient_checkpointing(False)
 
     def forward(
         self,

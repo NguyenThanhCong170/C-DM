@@ -1,0 +1,84 @@
+# ============================================================================
+# Fine-tune SD 1.5 có điều kiện multi-hot 5 nhãn trên NIH ChestX-ray14
+#   python train_multilabel.py --config config/multilabel.yaml
+# ============================================================================
+
+# --- Backbone ---------------------------------------------------------------
+pretrained_model_name_or_path: "./sd15"
+variant: "fp16"
+output_dir: "./out/multilabel"
+# Sau khi chạy train_vae_decoder.py, trỏ vào checkpoint để ảnh validation nét hơn:
+# vae_decoder_checkpoint: "./out/vae_decoder/vae_decoder-6000.safetensors"
+
+# --- LoRA -------------------------------------------------------------------
+# Điều kiện mới (nhãn) đi vào U-Net qua cross-attention, nên đó là nơi cần sức chứa.
+# cross_attention_only: true + rank cao là cấu hình hợp lý nhất cho bài toán này.
+rank: 128
+lora_alpha: 128
+lora_dropout: 0.0
+cross_attention_only: true
+# target_modules: ["to_q", "to_k", "to_v", "to_out.0"]   # dùng khi cross_attention_only=false
+
+# --- Label encoder ----------------------------------------------------------
+tokens_per_label: 2          # -> 1 + 5*2 = 11 token cho cross-attention
+label_encoder_layers: 2
+label_encoder_heads: 8
+label_encoder_dropout: 0.0
+label_encoder_lr: 0.0001     # module mới, train from scratch -> lr riêng
+cond_dropout_prob: 0.1       # 10% mẫu dùng null-label để học Classifier-Free Guidance
+
+# --- Dữ liệu ----------------------------------------------------------------
+data_root: "./data/nih"                # thư mục chứa Data_Entry_2017.csv và images_001..012/
+resolution: 512
+view_position: None                  # bỏ dòng này (hoặc để null) nếu muốn cả AP
+max_per_label:
+  No Finding: 15000                    # cắt lớp áp đảo (~60k ảnh) xuống mức hợp lý
+  Others: 20000
+max_images: null
+cache_dir: "./cache512"                # ảnh resize được cache -> epoch sau đọc nhanh hơn nhiều
+                                       # (~112k ảnh 512px ≈ 25-30 GB, đặt lên ổ nhanh)
+random_flip: false                     # X-quang ngực: KHÔNG lật ngang
+val_ratio: 0.05                        # tách theo Patient ID, tránh rò rỉ
+balance_beta: 0.5                      # 0 = giữ phân phối gốc, 1 = cân bằng hoàn toàn
+dataloader_num_workers: 4
+
+# --- Tối ưu -----------------------------------------------------------------
+learning_rate: 0.0001
+lr_scheduler: "cosine"
+lr_warmup_steps: 500
+adam_weight_decay: 0.01
+max_grad_norm: 1.0
+use_8bit_adam: false
+
+# --- Huấn luyện -------------------------------------------------------------
+seed: 42
+max_train_steps: 20000
+train_batch_size: 4
+gradient_accumulation_steps: 4         # batch hiệu dụng = 16
+gradient_checkpointing: true
+mixed_precision: "fp16"
+snr_gamma: 5.0
+
+# --- Log / checkpoint / validation -----------------------------------------
+logging_steps: 25
+checkpointing_steps: 1000
+validation_steps: 1000
+validation_inference_steps: 25
+validation_guidance_scale: 4.0
+validation_labels:
+  - ["No Finding"]
+  - ["Infiltration"]
+  - ["Effusion"]
+  - ["Atelectasis"]
+  - ["Effusion", "Atelectasis"]
+  - ["Infiltration", "Effusion", "Others"]
+
+# --- Weights & Biases --------------------------------------------------------
+# Đặt wandb_project: null để tắt hẳn. Đăng nhập trước bằng `wandb login`,
+# hoặc export WANDB_API_KEY=... ; nếu server không ra được mạng thì để
+# wandb_mode: "offline" rồi `wandb sync out/multilabel/wandb/offline-run-*` sau.
+wandb_project: "c-dm-multilabel"
+wandb_entity: null
+wandb_run_name: null       # null -> wandb tự đặt tên
+wandb_mode: "online"       # online | offline | disabled
+wandb_log_images: true     # đẩy ảnh validation lên wandb
