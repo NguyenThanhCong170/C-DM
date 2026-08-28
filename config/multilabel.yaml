@@ -30,7 +30,7 @@ cond_dropout_prob: 0.1       # 10% mẫu dùng null-label để học Classifier
 # --- Dữ liệu ----------------------------------------------------------------
 data_root: "./data/nih"                # thư mục chứa Data_Entry_2017.csv và images_001..012/
 resolution: 512
-view_position: None                  # bỏ dòng này (hoặc để null) nếu muốn cả AP
+view_position: null  # bỏ dòng này (hoặc để null) nếu muốn cả AP
 max_per_label:
   No Finding: 15000                    # cắt lớp áp đảo (~60k ảnh) xuống mức hợp lý
   Others: 20000

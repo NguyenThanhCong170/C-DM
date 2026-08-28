@@ -8,7 +8,7 @@ output_dir: "./out/vae_decoder"
 data_root: "./data/nih"
 resolution: 512
 crop_size: 256          # crop ngẫu nhiên: decoder là mạng tích chập nên vẫn tổng quát lên 512
-view_position: None
+view_position: null  
 max_images: 20000
 cache_dir: "./cache512"
 dataloader_num_workers: 4
