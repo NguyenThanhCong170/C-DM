@@ -1,24 +1,10 @@
 from __future__ import annotations
 
-"""
-Logger mỏng bọc quanh Weights & Biases.
-
-Mục tiêu: train_multilabel.py / train_vae_decoder.py gọi cùng một API dù wandb có
-được cài hay không, có mạng hay không. Mọi lỗi của wandb đều bị nuốt và in cảnh báo
-— một run 20k step không được phép chết vì logger.
-
-    logger = WandbLogger.from_config(args, job_type="diffusion")
-    logger.log({"loss": 0.31, "lr": 1e-4}, step=120)
-    logger.log_images(pil_images, ["No Finding", "Effusion"], step=1000)
-    logger.finish()
-"""
-
 import os
 from typing import Dict, List, Optional, Sequence
 
 
 class WandbLogger:
-    """No-op hoàn toàn khi wandb tắt/không cài — mọi method vẫn gọi được."""
 
     def __init__(self, run=None, log_images: bool = True):
         self._run = run

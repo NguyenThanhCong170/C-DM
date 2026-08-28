@@ -188,8 +188,6 @@ def main() -> int:
             vae.to(device)
             unet.to(device, dtype=amp_dtype if use_amp else None)
             enc.to(device, dtype=torch.float32)
-            if cfg.get("gradient_checkpointing") and hasattr(unet, "enable_gradient_checkpointing"):
-                unet.enable_gradient_checkpointing()
 
             params = lora_parameters(inj) + list(enc.parameters())
             optim = torch.optim.AdamW(params, lr=1e-4)
@@ -210,7 +208,7 @@ def main() -> int:
             noisy = sched.add_noise(lat, noise, t)
             with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                 ctx = enc(y, drop_prob=0.1)
-                pred = unet(noisy, t, encoder_hidden_states=ctx.to(noisy.dtype)).sample
+                pred = unet(noisy, t, encoder_hidden_states=ctx.to(noisy.dtype))
                 per = F.mse_loss(pred.float(), noise.float(), reduction="none").mean((1, 2, 3))
                 loss = (per * min_snr_weights(sched.compute_snr(t), 5.0)).mean()
             scaler.scale(loss).backward()

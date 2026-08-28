@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import List, Optional, Union
 
 import numpy as np
@@ -155,35 +154,6 @@ def dpm_solver_2m_step(
     return x_prev.to(dtype), x0_pred
 
 
-# --------------------------------------------------------------------------
-# Text conditioning / CFG
-# --------------------------------------------------------------------------
-
-@torch.no_grad()
-def encode_prompt(
-    tokenizer,
-    text_encoder,
-    prompts: List[str],
-    negative_prompts: Optional[List[str]],
-    device: Union[str, torch.device],
-) -> torch.Tensor:
-    def _encode(texts: List[str]) -> torch.Tensor:
-        tokens = tokenizer(
-            texts,
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids.to(device)
-        return text_encoder(tokens)[0]
-
-    cond_embeds = _encode(prompts)
-    if negative_prompts is None:
-        return cond_embeds
-    uncond_embeds = _encode(negative_prompts)
-    return torch.cat([uncond_embeds, cond_embeds], dim=0)
-
-
 @torch.no_grad()
 def decode_latents(vae, latents: torch.Tensor) -> List[Image.Image]:
     vae_dtype = next(vae.parameters()).dtype
@@ -193,80 +163,3 @@ def decode_latents(vae, latents: torch.Tensor) -> List[Image.Image]:
     pixel_values = pixel_values.cpu().permute(0, 2, 3, 1).numpy()
     images = (pixel_values * 255.0).round().astype("uint8")
     return [Image.fromarray(img) for img in images]
-
-
-# --------------------------------------------------------------------------
-# Vòng lặp sinh ảnh
-# --------------------------------------------------------------------------
-
-@dataclass
-class SDComponents:
-    unet: "torch.nn.Module"
-    vae: "torch.nn.Module"
-    text_encoder: "torch.nn.Module"
-    tokenizer: object
-
-
-@torch.no_grad()
-def sample(
-    components: SDComponents,
-    prompt: Union[str, List[str]],
-    negative_prompt: Union[str, List[str]] = "",
-    num_images: int = 1,
-    height: int = 512,
-    width: int = 512,
-    num_inference_steps: int = 25,   
-    guidance_scale: float = 7.5,
-    generator: Optional[torch.Generator] = None,
-    device: Union[str, torch.device] = "cuda",
-    dtype: Optional[torch.dtype] = None,
-    scheduler: Optional[NoiseScheduler] = None,
-) -> List[Image.Image]:
-    unet, vae, text_encoder, tokenizer = (
-        components.unet, components.vae, components.text_encoder, components.tokenizer,
-    )
-    if dtype is None:
-        dtype = next(unet.parameters()).dtype
-
-    scheduler = scheduler or NoiseScheduler()
-    do_cfg = guidance_scale > 1.0
-
-    prompts = [prompt] * num_images if isinstance(prompt, str) else list(prompt)
-    if isinstance(negative_prompt, str):
-        negatives = [negative_prompt] * len(prompts)
-    else:
-        negatives = list(negative_prompt)
-        if len(negatives) != len(prompts):
-            raise ValueError("negative_prompt phải cùng số lượng với prompt")
-    bsz = len(prompts)
-
-    text_embeddings = encode_prompt(
-        tokenizer, text_encoder, prompts, negatives if do_cfg else None, device
-    ).to(dtype=dtype)
-
-    latents = randn_tensor(
-        (bsz, unet.config.in_channels, height // 8, width // 8), generator, device, dtype
-    )
-    timesteps = scheduler.set_timesteps(num_inference_steps, device=device)
-
-    x0_pred_prev = None
-    r_t = None
-
-    for i, t in enumerate(timesteps):
-        latent_input = torch.cat([latents, latents], dim=0) if do_cfg else latents
-        t_batch = t.expand(latent_input.shape[0])
-
-        noise_pred = unet(latent_input, t_batch, encoder_hidden_states=text_embeddings).sample
-
-        if do_cfg:
-            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-        prev_t = int(timesteps[i + 1]) if i + 1 < len(timesteps) else -1
-        
-        latents, x0_pred_prev = dpm_solver_2m_step(
-            scheduler, noise_pred, int(t), prev_t, r_t, latents, x0_pred_prev
-        )
-        r_t = int(t)
-
-    return decode_latents(vae, latents)

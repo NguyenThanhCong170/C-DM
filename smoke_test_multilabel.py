@@ -99,7 +99,7 @@ t = torch.randint(0, 1000, (2,))
 noise = torch.randn_like(lat)
 noisy = sched.add_noise(lat, noise, t)
 ctx = enc(batch_multihot([["Effusion"],["No Finding"]], LABEL_NAMES), drop_prob=0.1)
-pred = unet(noisy, t, encoder_hidden_states=ctx).sample
+pred = unet(noisy, t, encoder_hidden_states=ctx)
 assert pred.shape == lat.shape
 w = min_snr_weights(sched.compute_snr(t), 5.0)
 loss = (torch.nn.functional.mse_loss(pred, noise, reduction="none").mean((1,2,3)) * w).mean()

@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import torch
 
-from .text_encoder import CLIPTextModel
-from .tokenizer import CLIPTokenizer
 from .unet import UNet2DConditionModel
 from .vae import AutoencoderKL
 
@@ -147,44 +145,6 @@ def load_vae(pretrained_path: str, subfolder: str = "vae",
     return model
 
 
-def load_text_encoder(pretrained_path: str, subfolder: str = "text_encoder",
-                      variant: Optional[str] = None,
-                      torch_dtype: Optional[torch.dtype] = None) -> CLIPTextModel:
-    folder = _resolve_folder(pretrained_path, subfolder)
-    cfg = _read_json(os.path.join(folder, "config.json"))
-    if "text_config" in cfg:
-        cfg = {**cfg, **cfg["text_config"]}
-
-    # XỬ LÝ LỖI MAPPING Ở ĐÂY: Quét cả 2 key "hidden_act" và "hidden_activation"
-    hidden_act = cfg.get("hidden_act", cfg.get("hidden_activation", "quick_gelu"))
-
-    model = CLIPTextModel(
-        vocab_size=cfg.get("vocab_size", 49408),
-        hidden_size=cfg.get("hidden_size", 768),
-        num_hidden_layers=cfg.get("num_hidden_layers", 12),
-        num_attention_heads=cfg.get("num_attention_heads", 12),
-        intermediate_size=cfg.get("intermediate_size", 3072),
-        max_position_embeddings=cfg.get("max_position_embeddings", 77),
-        hidden_act=hidden_act,
-        layer_norm_eps=cfg.get("layer_norm_eps", 1e-5),
-    )
-    state = _load_state_dict(folder, variant)
-    state = {k: v for k, v in state.items() if not k.endswith("position_ids")}
-    if not any(k.startswith("text_model.") for k in state):
-        state = {f"text_model.{k}": v for k, v in state.items()}
-    state.pop("text_projection.weight", None)
-    state.pop("logit_scale", None)
-
-    _strict_load(model, state, "text encoder")
-    if torch_dtype is not None:
-        model = model.to(torch_dtype)
-    return model
-
-
-def load_tokenizer(pretrained_path: str, subfolder: str = "tokenizer") -> CLIPTokenizer:
-    return CLIPTokenizer.from_pretrained(pretrained_path, subfolder=subfolder)
-
-
 def load_scheduler_config(pretrained_path: str, subfolder: str = "scheduler") -> Dict[str, Any]:
     folder = _resolve_folder(pretrained_path, subfolder)
     return _read_json(os.path.join(folder, "scheduler_config.json"))
@@ -243,25 +203,3 @@ def _strict_load(model: torch.nn.Module, state: Dict[str, torch.Tensor], what: s
             f"  thừa  ({len(unexpected)}): {list(unexpected)[:5]}\n"
             f"  lệch shape ({len(shape_errors)}): {shape_errors[:5]}\n"
         )
-
-
-def load_sd_components(
-    pretrained_path: str,
-    variant: Optional[str] = None,
-    torch_dtype: Optional[torch.dtype] = None,
-    verbose: bool = True,
-) -> Tuple[CLIPTokenizer, CLIPTextModel, AutoencoderKL, UNet2DConditionModel, Dict[str, Any]]:
-    if not os.path.isdir(pretrained_path):
-        raise FileNotFoundError(f"'{pretrained_path}' không phải thư mục.")
-
-    tokenizer = load_tokenizer(pretrained_path)
-    text_encoder = load_text_encoder(pretrained_path, variant=variant, torch_dtype=torch_dtype)
-    vae = load_vae(pretrained_path, variant=variant, torch_dtype=torch_dtype)
-    unet = load_unet(pretrained_path, variant=variant, torch_dtype=torch_dtype)
-    scheduler_config = load_scheduler_config(pretrained_path)
-
-    if verbose:
-        n = lambda m: sum(p.numel() for p in m.parameters())
-        print(f"[load] tokenizer vocab={len(tokenizer)} | text_encoder {n(text_encoder)/1e6:.1f}M "
-              f"| vae {n(vae)/1e6:.1f}M | unet {n(unet)/1e6:.1f}M")
-    return tokenizer, text_encoder, vae, unet, scheduler_config

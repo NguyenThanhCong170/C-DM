@@ -32,7 +32,6 @@ lr_warmup_steps: 5
 max_train_steps: 30
 train_batch_size: 2
 gradient_accumulation_steps: 1
-gradient_checkpointing: true
 mixed_precision: "fp16"
 snr_gamma: 5.0
 
@@ -45,4 +44,4 @@ validation_labels:
   - ["No Finding"]
   - ["Effusion", "Atelectasis"]
 
-wandb_project: null        # chạy thử thì không cần log lên wandb
+wandb_mode: "disabled"    # chạy thử thì không log

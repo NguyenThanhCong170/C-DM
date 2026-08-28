@@ -6,50 +6,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
+from .models_config import _Config
 
-# --------------------------------------------------------------------------
-# Containers & Helpers
-# --------------------------------------------------------------------------
+from .small_block.downsample import Downsample2D
+from .small_block.resnet import ResnetBlock2D
+from .small_block.upsample import Upsample2D
 
-
-class _Config(dict):
-    def __getattr__(self, name: str) -> Any:
-        try:
-            return self[name]
-        except KeyError:
-            raise AttributeError(name)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        self[name] = value
-
-
-class UNet2DConditionOutput:
-    """Wrapper đầu ra tương thích Diffusers API."""
-    __slots__ = ("sample",)
-
-    def __init__(self, sample: torch.Tensor):
-        self.sample = sample
-
-    def __getitem__(self, idx):
-        return self.sample[idx]
-
-    @property
-    def shape(self):
-        return self.sample.shape
-
-    @property
-    def dtype(self):
-        return self.sample.dtype
-
-    @property
-    def device(self):
-        return self.sample.device
-
-
-# --------------------------------------------------------------------------
-# Timestep Embedding (Chuẩn toán học 100% của Diffusers)
-# --------------------------------------------------------------------------
+from .middle_block.unet.step_embedding import TimestepEmbedding
+from .middle_block.unet.trans_block import Transformer2DModel
 
 
 def get_timestep_embedding(
@@ -79,314 +45,6 @@ def get_timestep_embedding(
         emb = F.pad(emb, (0, 1, 0, 0))
     return emb
 
-
-# --------------------------------------------------------------------------
-# Gradient checkpointing
-# --------------------------------------------------------------------------
-
-def _maybe_ckpt(enabled: bool, fn, *inputs):
-    """
-    Chạy `fn(*inputs)` qua torch.utils.checkpoint khi bật gradient checkpointing.
-
-    use_reentrant=False là bắt buộc ở đây: bản reentrant cũ yêu cầu ít nhất một
-    input requires_grad, mà khi backbone đóng băng (chỉ LoRA học) điều đó không
-    luôn đúng ở mọi block — gradient sẽ âm thầm biến mất thay vì báo lỗi.
-    """
-    if enabled and torch.is_grad_enabled():
-        from torch.utils.checkpoint import checkpoint
-        return checkpoint(fn, *inputs, use_reentrant=False)
-    return fn(*inputs)
-
-
-class TimestepEmbedding(nn.Module):
-    def __init__(self, in_channels: int, time_embed_dim: int, act_fn: str = "silu"):
-        super().__init__()
-        self.linear_1 = nn.Linear(in_channels, time_embed_dim)
-        self.act = nn.SiLU() if act_fn == "silu" else nn.GELU()
-        self.linear_2 = nn.Linear(time_embed_dim, time_embed_dim)
-
-    def forward(self, sample: torch.Tensor) -> torch.Tensor:
-        sample = self.linear_1(sample)
-        sample = self.act(sample)
-        sample = self.linear_2(sample)
-        return sample
-
-
-# --------------------------------------------------------------------------
-# Attention & Spatial Transformer
-# --------------------------------------------------------------------------
-
-
-class CrossAttention(nn.Module):
-    def __init__(
-        self,
-        query_dim: int,
-        context_dim: Optional[int] = None,
-        heads: int = 8,
-        dim_head: int = 64,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-        inner_dim = dim_head * heads
-        context_dim = context_dim if context_dim is not None else query_dim
-
-        self.scale = dim_head ** -0.5
-        self.heads = heads
-        self.dim_head = dim_head
-
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
-
-        self.to_out = nn.ModuleList([
-            nn.Linear(inner_dim, query_dim),
-            nn.Dropout(dropout),
-        ])
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        context = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
-
-        q = self.to_q(hidden_states)
-        k = self.to_k(context)
-        v = self.to_v(context)
-
-        batch_size, seq_len, _ = q.shape
-        ctx_len = k.shape[1]
-
-        q = q.view(batch_size, seq_len, self.heads, self.dim_head).transpose(1, 2)
-        k = k.view(batch_size, ctx_len, self.heads, self.dim_head).transpose(1, 2)
-        v = v.view(batch_size, ctx_len, self.heads, self.dim_head).transpose(1, 2)
-
-        # PyTorch FlashAttention / SDPA (O(N) memory complexity)
-        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
-
-        out = out.transpose(1, 2).contiguous().reshape(batch_size, seq_len, self.heads * self.dim_head)
-        out = self.to_out[0](out)
-        out = self.to_out[1](out)
-        return out
-
-
-class FeedForward(nn.Module):
-    def __init__(self, dim: int, dim_out: Optional[int] = None, mult: int = 4, dropout: float = 0.0):
-        super().__init__()
-        inner_dim = int(dim * mult)
-        dim_out = dim_out if dim_out is not None else dim
-        self.net = nn.ModuleList([
-            GEGLU(dim, inner_dim),
-            nn.Dropout(dropout),
-            nn.Linear(inner_dim, dim_out),
-        ])
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.net[0](hidden_states)
-        hidden_states = self.net[1](hidden_states)
-        hidden_states = self.net[2](hidden_states)
-        return hidden_states
-
-
-class GEGLU(nn.Module):
-    def __init__(self, dim_in: int, dim_out: int):
-        super().__init__()
-        self.proj = nn.Linear(dim_in, dim_out * 2)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, gate = self.proj(hidden_states).chunk(2, dim=-1)
-        return hidden_states * F.gelu(gate)
-
-
-class BasicTransformerBlock(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        n_heads: int,
-        d_head: int,
-        dropout: float = 0.0,
-        context_dim: Optional[int] = None,
-    ):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim, eps=1e-5)
-        self.attn1 = CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)
-        self.norm2 = nn.LayerNorm(dim, eps=1e-5)
-        self.attn2 = CrossAttention(query_dim=dim, context_dim=context_dim, heads=n_heads, dim_head=d_head, dropout=dropout)
-        self.norm3 = nn.LayerNorm(dim, eps=1e-5)
-        self.ff = FeedForward(dim, dropout=dropout)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.attn1(self.norm1(hidden_states)) + hidden_states
-        hidden_states = self.attn2(self.norm2(hidden_states), encoder_hidden_states=encoder_hidden_states) + hidden_states
-        hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
-        return hidden_states
-
-
-class Transformer2DModel(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        n_heads: int,
-        d_head: int,
-        depth: int = 1,
-        dropout: float = 0.0,
-        context_dim: Optional[int] = None,
-        norm_num_groups: int = 32,
-        use_linear_projection: bool = False,
-    ):
-        super().__init__()
-        self.use_linear_projection = use_linear_projection
-        self.in_channels = in_channels
-        inner_dim = n_heads * d_head
-        self.inner_dim = inner_dim
-
-        self.norm = nn.GroupNorm(num_groups=norm_num_groups, num_channels=in_channels, eps=1e-6, affine=True)
-        if use_linear_projection:
-            self.proj_in = nn.Linear(in_channels, inner_dim)
-            self.proj_out = nn.Linear(inner_dim, in_channels)
-        else:
-            self.proj_in = nn.Conv2d(in_channels, inner_dim, kernel_size=1, stride=1, padding=0)
-            self.proj_out = nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
-
-        self.transformer_blocks = nn.ModuleList([
-            BasicTransformerBlock(dim=inner_dim, n_heads=n_heads, d_head=d_head, dropout=dropout, context_dim=context_dim)
-            for _ in range(depth)
-        ])
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        batch, channel, height, width = hidden_states.shape
-        hidden_states = self.norm(hidden_states)
-
-        if self.use_linear_projection:
-            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, channel)
-            hidden_states = self.proj_in(hidden_states)
-        else:
-            hidden_states = self.proj_in(hidden_states)
-            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * width, self.inner_dim)
-
-        for block in self.transformer_blocks:
-            hidden_states = block(hidden_states, encoder_hidden_states=encoder_hidden_states)
-
-        if self.use_linear_projection:
-            hidden_states = self.proj_out(hidden_states)
-            hidden_states = hidden_states.reshape(batch, height, width, channel).permute(0, 3, 1, 2).contiguous()
-        else:
-            hidden_states = hidden_states.reshape(batch, height, width, self.inner_dim).permute(0, 3, 1, 2).contiguous()
-            hidden_states = self.proj_out(hidden_states)
-
-        return hidden_states + residual
-
-
-# --------------------------------------------------------------------------
-# ResNet & Up/Down Sampling
-# --------------------------------------------------------------------------
-
-
-class ResnetBlock2D(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: Optional[int] = None,
-        temb_channels: Optional[int] = 1280,
-        groups: int = 32,
-        eps: float = 1e-5,
-    ):
-        super().__init__()
-        out_channels = out_channels if out_channels is not None else in_channels
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-
-        self.norm1 = nn.GroupNorm(groups, in_channels, eps=eps, affine=True)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-
-        if temb_channels is not None and temb_channels > 0:
-            self.time_emb_proj = nn.Linear(temb_channels, out_channels)
-        else:
-            self.time_emb_proj = None
-
-        self.norm2 = nn.GroupNorm(groups, out_channels, eps=eps, affine=True)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.nonlinearity = nn.SiLU()
-
-        self.conv_shortcut = (
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
-            if in_channels != out_channels else nn.Identity()
-        )
-
-    def forward(self, input_tensor: torch.Tensor, temb: Optional[torch.Tensor] = None) -> torch.Tensor:
-        hidden_states = input_tensor
-        hidden_states = self.norm1(hidden_states)
-        hidden_states = self.nonlinearity(hidden_states)
-        hidden_states = self.conv1(hidden_states)
-
-        if self.time_emb_proj is not None and temb is not None:
-            temb = self.time_emb_proj(self.nonlinearity(temb))[:, :, None, None]
-            hidden_states = hidden_states + temb
-
-        hidden_states = self.norm2(hidden_states)
-        hidden_states = self.nonlinearity(hidden_states)
-        hidden_states = self.conv2(hidden_states)
-
-        return self.conv_shortcut(input_tensor) + hidden_states
-
-
-class Downsample2D(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: Optional[int] = None,
-        use_conv: bool = True,
-        padding: int = 1,
-        **kwargs: Any,
-    ):
-        super().__init__()
-        out_channels = out_channels if out_channels is not None else in_channels
-        self.use_conv = use_conv
-        self.padding = padding
-        if use_conv:
-            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=padding)
-        else:
-            self.conv = nn.Identity()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.use_conv:
-            if self.padding == 0:
-                hidden_states = F.pad(hidden_states, (0, 1, 0, 1), mode="constant", value=0)
-            hidden_states = self.conv(hidden_states)
-        else:
-            hidden_states = F.avg_pool2d(hidden_states, kernel_size=2, stride=2)
-        return hidden_states
-
-
-class Upsample2D(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: Optional[int] = None,
-        use_conv: bool = True,
-        **kwargs: Any,
-    ):
-        super().__init__()
-        out_channels = out_channels if out_channels is not None else in_channels
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1) if use_conv else nn.Identity()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = F.interpolate(hidden_states, scale_factor=2.0, mode="nearest")
-        return self.conv(hidden_states)
-
-
-# --------------------------------------------------------------------------
-# Down, Mid, Up Blocks
-# --------------------------------------------------------------------------
 
 
 class CrossAttnDownBlock2D(nn.Module):
@@ -431,13 +89,12 @@ class CrossAttnDownBlock2D(nn.Module):
         temb: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
-        gc_on = getattr(self, "gradient_checkpointing", False)
         output_states = ()
         for resnet, attn in zip(self.resnets, self.attentions):
-            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
-            hidden_states = _maybe_ckpt(
-                gc_on, lambda h, c, _a=attn: _a(h, encoder_hidden_states=c),
-                hidden_states, encoder_hidden_states)
+            hidden_states = checkpoint(resnet, hidden_states, temb, use_reentrant=False)
+            hidden_states = checkpoint(attn, hidden_states,
+                                       encoder_hidden_states=encoder_hidden_states,
+                                       use_reentrant=False)
             output_states = output_states + (hidden_states,)
 
         if self.downsamplers is not None:
@@ -468,10 +125,9 @@ class DownBlock2D(nn.Module):
         ]) if add_downsample else None
 
     def forward(self, hidden_states: torch.Tensor, temb: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
-        gc_on = getattr(self, "gradient_checkpointing", False)
         output_states = ()
         for resnet in self.resnets:
-            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
+            hidden_states = checkpoint(resnet, hidden_states, temb, use_reentrant=False)
             output_states = output_states + (hidden_states,)
 
         if self.downsamplers is not None:
@@ -513,12 +169,11 @@ class UNetMidBlock2DCrossAttn(nn.Module):
         temb: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        gc_on = getattr(self, "gradient_checkpointing", False)
-        hidden_states = _maybe_ckpt(gc_on, self.resnets[0], hidden_states, temb)
-        hidden_states = _maybe_ckpt(
-            gc_on, lambda h, c: self.attentions[0](h, encoder_hidden_states=c),
-            hidden_states, encoder_hidden_states)
-        hidden_states = _maybe_ckpt(gc_on, self.resnets[1], hidden_states, temb)
+        hidden_states = checkpoint(self.resnets[0], hidden_states, temb, use_reentrant=False)
+        hidden_states = checkpoint(self.attentions[0], hidden_states,
+                                   encoder_hidden_states=encoder_hidden_states,
+                                   use_reentrant=False)
+        hidden_states = checkpoint(self.resnets[1], hidden_states, temb, use_reentrant=False)
         return hidden_states
 
 
@@ -572,15 +227,14 @@ class CrossAttnUpBlock2D(nn.Module):
         temb: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        gc_on = getattr(self, "gradient_checkpointing", False)
         for resnet, attn in zip(self.resnets, self.attentions):
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
-            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
-            hidden_states = _maybe_ckpt(
-                gc_on, lambda h, c, _a=attn: _a(h, encoder_hidden_states=c),
-                hidden_states, encoder_hidden_states)
+            hidden_states = checkpoint(resnet, hidden_states, temb, use_reentrant=False)
+            hidden_states = checkpoint(attn, hidden_states,
+                                       encoder_hidden_states=encoder_hidden_states,
+                                       use_reentrant=False)
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
@@ -621,12 +275,11 @@ class UpBlock2D(nn.Module):
         res_hidden_states_tuple: Tuple[torch.Tensor, ...],
         temb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        gc_on = getattr(self, "gradient_checkpointing", False)
         for resnet in self.resnets:
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
-            hidden_states = _maybe_ckpt(gc_on, resnet, hidden_states, temb)
+            hidden_states = checkpoint(resnet, hidden_states, temb, use_reentrant=False)
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
@@ -790,33 +443,13 @@ class UNet2DConditionModel(nn.Module):
         self.conv_act = nn.SiLU()
         self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
 
-    # ------------------------------------------------------------------
-    # Gradient checkpointing: đánh đổi ~30% tốc độ lấy ~40-50% VRAM.
-    # Chỉ bật khi train; lúc suy diễn (no_grad) helper tự bỏ qua.
-    # ------------------------------------------------------------------
-    _CKPT_BLOCKS = (
-        "CrossAttnDownBlock2D", "DownBlock2D",
-        "UNetMidBlock2DCrossAttn", "CrossAttnUpBlock2D", "UpBlock2D",
-    )
-
-    def enable_gradient_checkpointing(self, value: bool = True) -> None:
-        n = 0
-        for module in self.modules():
-            if type(module).__name__ in self._CKPT_BLOCKS:
-                module.gradient_checkpointing = bool(value)
-                n += 1
-        print(f"[unet] gradient checkpointing {'BẬT' if value else 'TẮT'} trên {n} block")
-
-    def disable_gradient_checkpointing(self) -> None:
-        self.enable_gradient_checkpointing(False)
 
     def forward(
         self,
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
-        return_dict: bool = True,
-    ) -> Union[UNet2DConditionOutput, torch.Tensor]:
+    ) -> torch.Tensor:
         if not torch.is_tensor(timestep):
             timestep = torch.tensor([timestep], dtype=torch.long, device=sample.device)
         elif torch.is_tensor(timestep) and len(timestep.shape) == 0:
@@ -829,8 +462,7 @@ class UNet2DConditionModel(nn.Module):
             flip_sin_to_cos=True,
             downscale_freq_shift=0.0,
         )
-        # get_timestep_embedding luôn trả fp32 (chuẩn diffusers) — ép về dtype của
-        # model trước khi qua Linear, nếu không sẽ lỗi khi chạy fp16.
+
         emb = self.time_embedding(t_emb.to(dtype=sample.dtype))
 
         sample = self.conv_in(sample)
@@ -870,7 +502,5 @@ class UNet2DConditionModel(nn.Module):
         sample = self.conv_act(sample)
         sample = self.conv_out(sample)
 
-        if return_dict:
-            return UNet2DConditionOutput(sample=sample)
         return sample
  

@@ -14,9 +14,56 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 import torchvision.transforms as T
+from PIL import Image
 from torch.utils.data import Dataset, WeightedRandomSampler
 
-from .xray_dataset import preprocess_xray_to_rgb
+IMG_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+
+
+# Tiền xử lý mức pixel
+
+def percentile_normalize(arr: np.ndarray, lo: float = 0.5, hi: float = 99.5) -> np.ndarray:
+    """Cắt đuôi histogram [lo, hi] rồi trải về 0-255. Min-max thuần bị marker
+    'L'/'R' và viền collimator chiếm hết dải sáng, làm bẹt tương phản nhu mô."""
+    p_lo, p_hi = np.percentile(arr, [lo, hi])
+    if p_hi <= p_lo:
+        return _to_uint8_minmax(arr)
+    clipped = np.clip(arr, p_lo, p_hi)
+    return ((clipped - p_lo) / (p_hi - p_lo) * 255.0).round().astype(np.uint8)
+
+
+def _to_uint8_minmax(arr: np.ndarray) -> np.ndarray:
+    a_min, a_max = float(arr.min()), float(arr.max())
+    if a_max <= a_min:
+        return np.zeros_like(arr, dtype=np.uint8)
+    return ((arr - a_min) / (a_max - a_min) * 255.0).round().astype(np.uint8)
+
+
+def load_grayscale_array(path: Union[str, Path]) -> np.ndarray:
+    """Đọc về mảng 2D float32, giữ nguyên dải động gốc (kể cả PNG 16-bit)."""
+    img = Image.open(path)
+    if img.mode in ("I;16", "I;16B", "I", "F"):
+        arr = np.asarray(img)
+    else:
+        arr = np.asarray(img.convert("L"))
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    return arr.astype(np.float32)
+
+
+def preprocess_xray_to_rgb(
+    path: Union[str, Path],
+    size: int = 512,
+    use_percentile_norm: bool = True,
+    percentile_lo: float = 0.5,
+    percentile_hi: float = 99.5,
+) -> Image.Image:
+    """Chuẩn hóa mức xám, resize LANCZOS, nhân bản 3 kênh cho VAE."""
+    arr = load_grayscale_array(path)
+    arr8 = (percentile_normalize(arr, percentile_lo, percentile_hi)
+            if use_percentile_norm else _to_uint8_minmax(arr))
+    img = Image.fromarray(arr8, mode="L").resize((size, size), Image.LANCZOS)
+    return img.convert("RGB")
 
 
 # Ánh xạ nhãn
@@ -38,6 +85,8 @@ def finding_string_to_multihot(finding: str) -> np.ndarray:
         vec[0] = 1.0
         return vec
     for p in parts:
+        if p == "No Finding":
+            continue
         idx = _EXPLICIT.get(p)
         if idx is not None:
             vec[idx] = 1.0
@@ -68,7 +117,7 @@ def index_image_files(root: Union[str, Path]) -> Dict[str, Path]:
         if not folder.is_dir():
             continue
         for p in folder.iterdir():
-            if p.suffix.lower() in (".png"):
+            if p.suffix.lower() in IMG_EXTENSIONS:
                 mapping.setdefault(p.name, p)
     return mapping
 
@@ -97,12 +146,12 @@ class NIHMultiLabelDataset(Dataset):
     ):
         self.size = int(size)
         self.use_percentile_norm = use_percentile_norm
-        self.cache_dir = Path(cache_dir) 
+        self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         data_root = Path(data_root)
-        csv_path = Path(csv_path)
+        csv_path = Path(csv_path) if csv_path else data_root / "Data_Entry_2017.csv"
         if not csv_path.is_file():
             raise FileNotFoundError(f"Không thấy {csv_path}")
 
@@ -203,7 +252,6 @@ class NIHMultiLabelDataset(Dataset):
         if self.cache_dir is not None:
             cached = self._cached_path(path)
             if cached.is_file():
-                from PIL import Image
                 return Image.open(cached).convert("RGB")
             img = preprocess_xray_to_rgb(path, size=self.size,
                                          use_percentile_norm=self.use_percentile_norm)

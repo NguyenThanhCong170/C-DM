@@ -93,7 +93,7 @@ def sample_from_labels(
         latent_input = torch.cat([latents, latents], dim=0) if do_cfg else latents
         t_batch = t.expand(latent_input.shape[0])
 
-        noise_pred = unet(latent_input, t_batch, encoder_hidden_states=context).sample
+        noise_pred = unet(latent_input, t_batch, encoder_hidden_states=context)
 
         if do_cfg:
             noise_uncond, noise_cond = noise_pred.chunk(2, dim=0)

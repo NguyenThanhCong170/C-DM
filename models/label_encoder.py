@@ -2,26 +2,6 @@ from __future__ import annotations
 
 """
 Bộ mã hóa nhãn multi-hot thay cho CLIP text encoder.
-
-Ý tưởng: U-Net của Stable Diffusion nhận điều kiện qua cross-attention với một
-CHUỖI vector (B, L, cross_attention_dim). Ta không cần chuỗi đó phải đến từ text —
-chỉ cần nó mang đúng thông tin nhãn. Module này biến vector multi-hot y ∈ {0,1}^K
-thành chuỗi token có cùng chiều với CLIP, nên toàn bộ trọng số cross-attention đã
-pretrain vẫn dùng lại được (chỉ tinh chỉnh qua LoRA).
-
-Mỗi nhãn k được cấp 2 bộ token học được:
-    present_emb[k]  — dùng khi y_k = 1
-    absent_emb[k]   — dùng khi y_k = 0
-Token thứ k = y_k · present + (1 − y_k) · absent  →  nhãn vắng mặt cũng là một tín
-hiệu rõ ràng (khác hẳn việc cắt token đi), và công thức nội suy này cho phép truyền
-nhãn mềm (y ∈ [0,1]) lúc suy diễn để trộn mức độ biểu hiện bệnh.
-
-Thêm 1 token toàn cục (kiểu BOS) + positional embedding, rồi vài lớp Transformer
-để các nhãn "nói chuyện" với nhau (đồng mắc Effusion+Atelectasis khác tổng hai bệnh
-riêng lẻ).
-
-Classifier-Free Guidance: có sẵn `null_tokens` học được, dùng cho nhánh uncond.
-Lúc train, `forward(..., drop_prob=0.1)` sẽ thay ngẫu nhiên 10% mẫu bằng null.
 """
 
 import json
@@ -33,7 +13,7 @@ from typing import List, Optional, Sequence, Union
 import torch
 import torch.nn as nn
 
-# Thứ tự nhãn mặc định (5 chiều). Chỉ số này phải khớp giữa dataset / train / suy diễn.
+# Thứ tự nhãn mặc định (5 chiều)
 DEFAULT_LABELS: tuple = ("No Finding", "Infiltration", "Effusion", "Atelectasis", "Others")
 
 
@@ -101,8 +81,6 @@ class MultiHotLabelEncoder(nn.Module):
             self.transformer = None
 
         self.final_norm = nn.LayerNorm(D)
-        # Scale khởi tạo gần với biên độ last_hidden_state của CLIP (~1) để U-Net
-        # không bị sốc phân phối ở bước đầu.
         self.out_scale = nn.Parameter(torch.ones(1))
 
     # ------------------------------------------------------------------

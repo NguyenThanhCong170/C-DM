@@ -6,97 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .unet import Downsample2D, ResnetBlock2D, Upsample2D, _Config
+from .models_config import _Config
 
+from .middle_block.vae.downencoderblock import DownEncoderBlock2D
+from .middle_block.vae.upencoderblock import UpDecoderBlock2D
+from .middle_block.vae.midblock import UNetMidBlock2D
 
-class VAEAttention(nn.Module):
-    def __init__(self, channels: int, num_groups: int = 32, eps: float = 1e-6):
-        super().__init__()
-        self.channels = channels
-        self.heads = 1
-        self.group_norm = nn.GroupNorm(num_groups, channels, eps=eps, affine=True)
-        self.to_q = nn.Linear(channels, channels, bias=True)
-        self.to_k = nn.Linear(channels, channels, bias=True)
-        self.to_v = nn.Linear(channels, channels, bias=True)
-        self.to_out = nn.ModuleList([nn.Linear(channels, channels, bias=True), nn.Dropout(0.0)])
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        residual = hidden_states
-        b, c, h, w = hidden_states.shape
-        hidden_states = self.group_norm(hidden_states)
-        hidden_states = hidden_states.view(b, c, h * w).transpose(1, 2)
-
-        q = self.to_q(hidden_states).unsqueeze(1)
-        k = self.to_k(hidden_states).unsqueeze(1)
-        v = self.to_v(hidden_states).unsqueeze(1)
-        out = F.scaled_dot_product_attention(q, k, v).squeeze(1)
-
-        out = self.to_out[1](self.to_out[0](out))
-        out = out.transpose(-1, -2).reshape(b, c, h, w)
-        return out + residual
-
-
-class DownEncoderBlock2D(nn.Module):
-    def __init__(self, in_channels, out_channels, num_layers=1, resnet_eps=1e-6,
-                 resnet_groups=32, add_downsample=True, downsample_padding=0):
-        super().__init__()
-        self.resnets = nn.ModuleList([
-            ResnetBlock2D(in_channels if i == 0 else out_channels, out_channels,
-                          temb_channels=None, groups=resnet_groups, eps=resnet_eps)
-            for i in range(num_layers)
-        ])
-        self.downsamplers = nn.ModuleList(
-            [Downsample2D(out_channels, out_channels, use_conv=True, padding=downsample_padding)]
-        ) if add_downsample else None
-
-    def forward(self, x):
-        for resnet in self.resnets:
-            x = resnet(x, None)
-        if self.downsamplers is not None:
-            for ds in self.downsamplers:
-                x = ds(x)
-        return x
-
-
-class UpDecoderBlock2D(nn.Module):
-    def __init__(self, in_channels, out_channels, num_layers=1, resnet_eps=1e-6,
-                 resnet_groups=32, add_upsample=True):
-        super().__init__()
-        self.resnets = nn.ModuleList([
-            ResnetBlock2D(in_channels if i == 0 else out_channels, out_channels,
-                          temb_channels=None, groups=resnet_groups, eps=resnet_eps)
-            for i in range(num_layers)
-        ])
-        self.upsamplers = nn.ModuleList(
-            [Upsample2D(out_channels, out_channels, use_conv=True)]
-        ) if add_upsample else None
-
-    def forward(self, x):
-        for resnet in self.resnets:
-            x = resnet(x, None)
-        if self.upsamplers is not None:
-            for up in self.upsamplers:
-                x = up(x)
-        return x
-
-
-class UNetMidBlock2D(nn.Module):
-    def __init__(self, in_channels, num_layers=1, resnet_eps=1e-6, resnet_groups=32):
-        super().__init__()
-        resnets = [ResnetBlock2D(in_channels, in_channels, None, resnet_groups, resnet_eps)]
-        attentions = []
-        for _ in range(num_layers):
-            attentions.append(VAEAttention(in_channels, resnet_groups, resnet_eps))
-            resnets.append(ResnetBlock2D(in_channels, in_channels, None, resnet_groups, resnet_eps))
-        self.attentions = nn.ModuleList(attentions)
-        self.resnets = nn.ModuleList(resnets)
-
-    def forward(self, x):
-        x = self.resnets[0](x, None)
-        for attn, resnet in zip(self.attentions, self.resnets[1:]):
-            x = attn(x)
-            x = resnet(x, None)
-        return x
 
 
 class Encoder(nn.Module):

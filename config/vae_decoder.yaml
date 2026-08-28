@@ -1,9 +1,5 @@
-# ============================================================================
 # Stage phụ: tinh chỉnh decoder VAE trên ảnh X-quang (encoder ĐÓNG BĂNG)
-#   python train_vae_decoder.py --config config/vae_decoder.yaml
-# Chạy TRƯỚC hoặc SONG SONG với train_multilabel.py — hai stage độc lập vì
-# encoder không đổi nên latent space giữ nguyên.
-# ============================================================================
+
 
 pretrained_model_name_or_path: "./sd15"
 variant: "fp16"
@@ -12,7 +8,7 @@ output_dir: "./out/vae_decoder"
 data_root: "./data/nih"
 resolution: 512
 crop_size: 256          # crop ngẫu nhiên: decoder là mạng tích chập nên vẫn tổng quát lên 512
-view_position: "PA"
+view_position: None
 max_images: 20000
 cache_dir: "./cache512"
 dataloader_num_workers: 4
@@ -38,7 +34,5 @@ validation_steps: 500
 num_validation_images: 2
 
 wandb_project: "c-dm-multilabel"
-wandb_entity: null
 wandb_run_name: "vae-decoder"
 wandb_mode: "online"
-wandb_log_images: true

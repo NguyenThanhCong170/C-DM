@@ -13,14 +13,7 @@ from .lora import (
     save_lora_config,
     save_lora_weights,
 )
-from .loading import (
-    load_scheduler_config,
-    load_sd_components,
-    load_text_encoder,
-    load_tokenizer,
-    load_unet,
-    load_vae,
-)
+from .loading import load_scheduler_config, load_unet, load_vae
 from .label_encoder import (
     DEFAULT_LABELS,
     LabelEncoderConfig,
@@ -31,8 +24,6 @@ from .label_encoder import (
     load_label_encoder_into,
     save_label_encoder,
 )
-from .text_encoder import CLIPTextModel
-from .tokenizer import CLIPTokenizer
 from .unet import UNet2DConditionModel
 from .vae import AutoencoderKL
 
@@ -47,8 +38,7 @@ __all__ = [
     "save_label_encoder", "load_label_encoder", "load_label_encoder_into",
     "labels_to_multihot", "batch_multihot",
     # Kiến trúc
-    "UNet2DConditionModel", "AutoencoderKL", "CLIPTextModel", "CLIPTokenizer",
+    "UNet2DConditionModel", "AutoencoderKL",
     # Nạp checkpoint
-    "load_sd_components", "load_unet", "load_vae", "load_text_encoder",
-    "load_tokenizer", "load_scheduler_config",
+    "load_unet", "load_vae", "load_scheduler_config",
 ]

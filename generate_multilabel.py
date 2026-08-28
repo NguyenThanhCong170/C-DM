@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Sinh ảnh X-quang từ vector nhãn multi-hot (không cần prompt).
+Sinh ảnh X-quang từ vector nhãn multi-hot.
 
     python generate_multilabel.py --labels "Effusion|Atelectasis" -n 4
     python generate_multilabel.py --labels "No Finding" --guidance 3.0 --steps 25

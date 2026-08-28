@@ -37,7 +37,6 @@ max_per_label:
 max_images: null
 cache_dir: "./cache512"                # ảnh resize được cache -> epoch sau đọc nhanh hơn nhiều
                                        # (~112k ảnh 512px ≈ 25-30 GB, đặt lên ổ nhanh)
-random_flip: false                     # X-quang ngực: KHÔNG lật ngang
 val_ratio: 0.05                        # tách theo Patient ID, tránh rò rỉ
 balance_beta: 0.5                      # 0 = giữ phân phối gốc, 1 = cân bằng hoàn toàn
 dataloader_num_workers: 4
@@ -55,7 +54,6 @@ seed: 42
 max_train_steps: 20000
 train_batch_size: 4
 gradient_accumulation_steps: 4         # batch hiệu dụng = 16
-gradient_checkpointing: true
 mixed_precision: "fp16"
 snr_gamma: 5.0
 
@@ -74,11 +72,8 @@ validation_labels:
   - ["Infiltration", "Effusion", "Others"]
 
 # --- Weights & Biases --------------------------------------------------------
-# Đặt wandb_project: null để tắt hẳn. Đăng nhập trước bằng `wandb login`,
-# hoặc export WANDB_API_KEY=... ; nếu server không ra được mạng thì để
-# wandb_mode: "offline" rồi `wandb sync out/multilabel/wandb/offline-run-*` sau.
+# `wandb login` một lần trước khi chạy. Server không ra mạng -> wandb_mode: "offline",
+# xong run thì `wandb sync <output_dir>/wandb/offline-run-*`. Tắt hẳn: "disabled".
 wandb_project: "c-dm-multilabel"
-wandb_entity: null
 wandb_run_name: null       # null -> wandb tự đặt tên
 wandb_mode: "online"       # online | offline | disabled
-wandb_log_images: true     # đẩy ảnh validation lên wandb

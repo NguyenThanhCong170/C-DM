@@ -8,8 +8,7 @@ Kiến trúc:
     labels (B,5) --MultiHotLabelEncoder--> (B,L,768) --cross-attn--> U-Net(+LoRA)
 
 Train: LoRA của U-Net + toàn bộ LabelEncoder. VAE và phần còn lại của U-Net đóng băng.
-(Decoder VAE được tinh chỉnh riêng ở `train_vae_decoder.py` — nó không nằm trên đường
-đi của loss khuếch tán nên không thể train chung một lượt.)
+(Decoder VAE được tinh chỉnh riêng ở `train_vae_decoder.py`)
 
     python train_multilabel.py --config config/multilabel.yaml
 """
@@ -86,13 +85,11 @@ DEFAULTS: Dict[str, object] = {
     "max_per_label": None,              # {"No Finding": 15000}
     "max_images": None,
     "cache_dir": None,
-    "random_flip": False,
     "val_ratio": 0.0,                   # >0 -> tách theo Patient ID
     "balance_beta": 0.5,                # 0 = giữ phân phối gốc, 1 = cân bằng hẳn
     "dataloader_num_workers": 4,
     # Optimizer
     "learning_rate": 1e-4,
-    "use_8bit_adam": False,
     "adam_beta1": 0.9,
     "adam_beta2": 0.999,
     "adam_weight_decay": 1e-2,
@@ -105,7 +102,6 @@ DEFAULTS: Dict[str, object] = {
     "max_train_steps": 20000,
     "train_batch_size": 4,
     "gradient_accumulation_steps": 4,
-    "gradient_checkpointing": True,
     "mixed_precision": "fp16",
     "snr_gamma": 5.0,
     # Logging / checkpoint / validation
@@ -180,12 +176,6 @@ def set_seed(seed: int) -> None:
 def build_optimizer(param_groups, args) -> torch.optim.Optimizer:
     kw = dict(betas=(args.adam_beta1, args.adam_beta2),
               weight_decay=args.adam_weight_decay, eps=args.adam_epsilon)
-    if args.use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-            return bnb.optim.AdamW8bit(param_groups, lr=args.learning_rate, **kw)
-        except ImportError:
-            print("[warn] chưa cài bitsandbytes — dùng torch.optim.AdamW.")
     return torch.optim.AdamW(param_groups, lr=args.learning_rate, **kw)
 
 
@@ -264,11 +254,6 @@ def main(argv: Optional[list] = None) -> None:
     vae.to(device)                                    # VAE giữ fp32: encode chạy ngoài autocast
     unet.to(device, dtype=amp_dtype if use_amp else None)
 
-    if args.gradient_checkpointing and hasattr(unet, "enable_gradient_checkpointing"):
-        unet.enable_gradient_checkpointing()
-    elif args.gradient_checkpointing:
-        print("[warn] models/unet.py chưa hỗ trợ gradient checkpointing — bỏ qua.")
-
     # ---------------- 2. LoRA
     targets = ["attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0"] \
         if args.cross_attention_only else list(args.target_modules)
@@ -322,7 +307,6 @@ def main(argv: Optional[list] = None) -> None:
         max_per_label=args.max_per_label,
         max_images=args.max_images,
         patient_ids=train_pids,
-        random_flip=args.random_flip,
         cache_dir=args.cache_dir,
         seed=args.seed,
     )
@@ -389,7 +373,7 @@ def main(argv: Optional[list] = None) -> None:
                 # LabelEncoder cần gradient -> nằm TRONG autocast, không trong no_grad
                 context = label_encoder(labels, drop_prob=args.cond_dropout_prob)
                 model_pred = unet(noisy_latents, timesteps,
-                                  encoder_hidden_states=context.to(noisy_latents.dtype)).sample
+                                  encoder_hidden_states=context.to(noisy_latents.dtype))
                 loss = diffusion_loss(model_pred, noise, timesteps,
                                       noise_scheduler, args.snr_gamma)
 
@@ -406,7 +390,7 @@ def main(argv: Optional[list] = None) -> None:
                 raise RuntimeError(
                     f"Gradient không chảy (lora={n_lora_g}/{len(lora_params)}, "
                     f"label={n_le_g}/{len(le_params)}). Kiểm tra target_modules / "
-                    f"gradient_checkpointing.")
+                    f"target_modules.")
             print(f"[sanity] gradient tới {n_lora_g} tensor LoRA và {n_le_g} tensor LabelEncoder ✓")
             grad_checked = True
 

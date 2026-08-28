@@ -3,7 +3,6 @@ torchvision
 safetensors>=0.4
 Pillow
 numpy
-regex
 pyyaml
 
 gradio>=5

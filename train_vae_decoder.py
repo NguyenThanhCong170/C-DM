@@ -3,20 +3,6 @@ from __future__ import annotations
 """
 Tinh chỉnh DECODER của VAE trên ảnh X-quang ngực (encoder đóng băng).
 
-Vì sao phải là một stage riêng: loss khuếch tán chỉ đi qua encoder (ảnh -> latent)
-và U-Net. Decoder không nằm trên đồ thị tính toán đó, nên không thể train chung với
-`train_multilabel.py`. Ở đây ta train nó bằng loss tái tạo thuần:
-
-        x --(encoder đóng băng)--> z --(decoder train)--> x̂
-        L = L1(x, x̂) + w_perc · LPIPS-VGG(x, x̂)
-
-Đóng băng encoder là bắt buộc: nếu encoder đổi, không gian latent đổi theo và mọi
-checkpoint LoRA/U-Net đã train sẽ vô nghĩa.
-
-Vì sao đáng làm với X-quang: VAE của SD được train trên ảnh tự nhiên, khi nén ảnh
-xám dải động hẹp nó hay bôi mất các chi tiết tần số cao — vân mạch máu, đường Kerley,
-bờ tràn dịch mỏng. Chỉ cần decoder học lại đúng miền này là ảnh sinh ra nét hơn rõ rệt.
-
     python train_vae_decoder.py --config config/vae_decoder.yaml
 """
 
@@ -34,7 +20,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from dataset.nih_multilabel import NIHMultiLabelDataset, collate_multilabel
-from logging_utils import WandbLogger, gpu_memory_gb
+import wandb
 from models.loading import load_vae
 
 DEFAULTS: Dict[str, object] = {
@@ -69,11 +55,9 @@ DEFAULTS: Dict[str, object] = {
     "checkpointing_steps": 1000,
     "validation_steps": 500,
     "num_validation_images": 2,
-    "wandb_project": None,
-    "wandb_entity": None,
-    "wandb_run_name": None,
+    "wandb_project": "c-dm",
+    "wandb_run_name": "vae-decoder",
     "wandb_mode": "online",
-    "wandb_log_images": True,
 }
 
 
@@ -182,7 +166,8 @@ def main(argv: Optional[list] = None) -> None:
 
     output_dir = Path(args.output_dir)
     (output_dir / "validation").mkdir(parents=True, exist_ok=True)
-    logger = WandbLogger.from_config(args, job_type="vae-decoder")
+    wandb.init(project=args.wandb_project, name=args.wandb_run_name,
+               mode=args.wandb_mode, config=vars(args), dir=str(output_dir))
 
     vae = load_vae(args.pretrained_model_name_or_path, variant=args.variant)
     vae.to(device, dtype=torch.float32)
@@ -274,17 +259,16 @@ def main(argv: Optional[list] = None) -> None:
         if step % args.logging_steps == 0 or step == 1:
             parts = " ".join(f"{k}={v.item():.4f}" for k, v in logs.items())
             print(f"[step {step}/{args.max_train_steps}] {parts} lr={lr_scheduler.get_last_lr()[0]:.2e}")
-            logger.log({**{f"vae/{k}": v.item() for k, v in logs.items()},
-                        "vae/lr": lr_scheduler.get_last_lr()[0],
-                        **gpu_memory_gb()}, step=step)
+            wandb.log({**{f"vae/{k}": v.item() for k, v in logs.items()},
+                       "vae/lr": lr_scheduler.get_last_lr()[0]}, step=step)
 
         if args.validation_steps and step % args.validation_steps == 0:
-            _validate(vae, dataset, args, step, output_dir, device, logger)
+            _validate(vae, dataset, args, step, output_dir, device)
 
         if step % args.checkpointing_steps == 0 or step == args.max_train_steps:
             _save_decoder(vae, output_dir, step)
 
-    logger.finish()
+    wandb.finish()
     print("[done]")
 
 
@@ -301,7 +285,7 @@ def _save_decoder(vae, output_dir: Path, step: int) -> None:
 
 
 @torch.no_grad()
-def _validate(vae, dataset, args, step: int, output_dir: Path, device, logger=None) -> None:
+def _validate(vae, dataset, args, step: int, output_dir: Path, device) -> None:
     from PIL import Image
 
     vae.decoder.eval()
@@ -319,9 +303,8 @@ def _validate(vae, dataset, args, step: int, output_dir: Path, device, logger=No
         img.save(val_dir / f"recon_{i:02d}.png")
         made.append(img)
     print(f"[validation] step {step}: ảnh gốc|tái tạo -> {val_dir}")
-    if logger is not None:
-        logger.log_images(made, [f"gốc | tái tạo #{i}" for i in range(len(made))],
-                          step=step, key="vae/reconstruction")
+    wandb.log({"vae/reconstruction": [wandb.Image(im, caption=f"gốc | tái tạo #{i}")
+                                      for i, im in enumerate(made)]}, step=step)
     vae.decoder.train()
 
 
