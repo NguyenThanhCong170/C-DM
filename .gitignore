@@ -22,3 +22,10 @@ flagged/
 .vscode/
 .sh
 
+# Cache ảnh đã resize (25-30 GB) — KHÔNG commit
+cache512/
+cache*/
+
+# Log training + wandb offline
+logs/
+wandb/

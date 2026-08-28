@@ -17,8 +17,6 @@ DEFAULT_TARGET_MODULES: Tuple[str, ...] = (
     "to_out.0",   # output projection của attention
 )
 
-# Gợi ý nếu muốn tăng capacity (áp cho cả conv của ResNet block):
-#   --target_modules to_q to_k to_v to_out.0 proj_in proj_out conv1 conv2
 CONV_TARGET_MODULES: Tuple[str, ...] = ("conv1", "conv2", "conv_shortcut")
 
 

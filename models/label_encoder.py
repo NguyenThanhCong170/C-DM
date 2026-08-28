@@ -57,9 +57,9 @@ class MultiHotLabelEncoder(nn.Module):
         # Token cho từng nhãn ở hai trạng thái có/không
         self.present_emb = nn.Parameter(torch.randn(K, T, D) * 0.02)
         self.absent_emb = nn.Parameter(torch.randn(K, T, D) * 0.02)
-        # Token toàn cục — chỗ để model gom ngữ cảnh chung "đây là ảnh X-quang ngực"
+        # Token toàn cục 
         self.global_token = nn.Parameter(torch.randn(1, 1, D) * 0.02)
-        # Vị trí: chuỗi ngắn và có thứ tự cố định nên dùng positional học được
+        # Vị trí
         self.pos_emb = nn.Parameter(torch.randn(1, cfg.num_tokens, D) * 0.02)
         # Chuỗi rỗng cho nhánh uncond của CFG
         self.null_tokens = nn.Parameter(torch.randn(1, cfg.num_tokens, D) * 0.02)
