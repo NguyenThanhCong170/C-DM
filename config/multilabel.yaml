@@ -52,7 +52,7 @@ use_8bit_adam: false
 # --- Huấn luyện -------------------------------------------------------------
 seed: 42
 max_train_steps: 20000
-train_batch_size: 4
+train_batch_size: 10
 gradient_accumulation_steps: 4         # batch hiệu dụng = 16
 mixed_precision: "fp16"
 snr_gamma: 5.0
