@@ -1,7 +1,3 @@
-"""
-Các chỉ số CAS: Hamming accuracy, exact match ratio, AUC-ROC / F1 theo từng nhãn,
-và no-finding accuracy.
-"""
 import numpy as np
 from sklearn.metrics import f1_score, roc_auc_score
 
@@ -18,8 +14,7 @@ def exact_match_ratio(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 def per_label_metrics(y_true: np.ndarray, y_prob: np.ndarray, y_pred: np.ndarray,
                        label_names: list[str]) -> dict:
-    """AUC-ROC (dùng xác suất liên tục) và F1 (dùng nhãn nhị phân) cho từng nhãn.
-    AUC sẽ bị bỏ qua (None) nếu 1 nhãn không có đủ cả 2 lớp dương/âm trong batch."""
+
     out = {}
     for i, name in enumerate(label_names):
         yt, yp, ypred = y_true[:, i], y_prob[:, i], y_pred[:, i]
@@ -36,8 +31,7 @@ def per_label_metrics(y_true: np.ndarray, y_prob: np.ndarray, y_pred: np.ndarray
 
 def bootstrap_ci(values_true: np.ndarray, values_pred_or_prob: np.ndarray,
                   metric_fn, n_iterations: int = 1000, seed: int = 0) -> tuple[float, float]:
-    """Khoảng tin cậy 95% bằng bootstrap resample — quan trọng vì n/combo chỉ ~125,
-    AUC-ROC riêng từng nhãn có thể biến động khá nhiều giữa các lần chạy."""
+
     rng = np.random.default_rng(seed)
     n = len(values_true)
     scores = []
@@ -54,8 +48,4 @@ def bootstrap_ci(values_true: np.ndarray, values_pred_or_prob: np.ndarray,
 
 
 def derive_no_finding(y_pred_diseases: np.ndarray) -> np.ndarray:
-    """no-finding (DỰ ĐOÁN) = True khi KHÔNG có nhãn bệnh nào trong 3 nhãn target
-    vượt ngưỡng. Đây là quy ước phía dự đoán (judge model không có output
-    "no finding" riêng); phía ground truth thì dùng thẳng cột "gt_No Finding"
-    có sẵn trong metadata.csv (không cần suy ra) — xem compute_cas.py."""
     return (y_pred_diseases.sum(axis=1) == 0).astype(int)

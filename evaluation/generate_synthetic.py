@@ -73,8 +73,6 @@ def main():
         combo_name = combo["name"]
         label_vector = labels_to_multihot(combo["labels"], LABEL_NAMES)  # (5,)
 
-        # "count" đặt riêng cho từng combo (vd TSTR cần phân phối nhãn lệch, không
-        # đều nhau) -> ưu tiên hơn "images_per_combo" chung (vd CAS cần đều nhau).
         n_per_combo = combo.get("count", default_n_per_combo)
         if n_per_combo is None:
             raise ValueError(

@@ -1,4 +1,7 @@
-# Hướng dẫn: tự chạy evaluation khi cập nhật model
+# Cập nhật checkpoint model
+
+Hướng dẫn thao tác khi nhóm có checkpoint LoRA / label encoder mới, và cách tự
+sửa các trường hợp phổ biến mà không cần đụng vào code đánh giá.
 
 ## 1. Quy trình chuẩn mỗi khi có checkpoint mới
 
@@ -18,20 +21,22 @@ python -m evaluation.generate_synthetic --config config/evaluation/cas.yaml
 python -m evaluation.cas.compute_cas --config config/evaluation/cas.yaml
 
 # 4. Kết quả:
-#    data/synthetic/<version_tag>/            (ảnh + metadata.csv, KHÔNG commit)
-#    reports/cas/<version_tag>/cas_report.json   (commit để so sánh giữa các lần train)
+#    data/synthetic/<version_tag>/              (ảnh + metadata.csv, KHÔNG commit)
+#    reports/cas/<version_tag>/cas_report.json  (commit để so sánh giữa các lần train)
 #    reports/cas/<version_tag>/cas_predictions.csv
 ```
 
-`<version_tag>`in ra ngay dòng đầu log của cả 2 lệnh, dạng `multilabel_20260829-1530`
-— ghép tên thư mục cha của checkpoint + giờ sửa file.
+`<version_tag>` được in ra ở dòng đầu log của cả 2 lệnh trên, dạng
+`multilabel_20260829-1530` — ghép tên thư mục cha của checkpoint với thời điểm
+sửa file gần nhất.
 
 ## 2. Luôn chạy thử nhanh trước khi chạy full 500 ảnh
 
-Sửa tạm `images_per_combo` trong `config/evaluation/cas.yaml` xuống 2-3, chạy hết
-2 lệnh ở mục 1 để bắt lỗi sớm (sai đường dẫn checkpoint, LoRA lệch rank, model
-load lỗi...) trước khi tốn thời gian sinh 500 ảnh thật. Chạy được không lỗi
-(dù số liệu vô nghĩa vì n quá nhỏ) → đổi lại 125 và chạy full.
+Sửa tạm `images_per_combo` trong `config/evaluation/cas.yaml` xuống 2-3, chạy
+hết 2 lệnh ở mục 1 để bắt lỗi sớm (sai đường dẫn checkpoint, LoRA lệch rank,
+model load lỗi...) trước khi tốn thời gian sinh 500 ảnh thật. Nếu chạy xong
+không lỗi (số liệu lúc này chưa có ý nghĩa vì cỡ mẫu quá nhỏ) → đổi lại `125`
+và chạy full.
 
 ## 3. Các thay đổi thường gặp và cần sửa ở đâu
 
@@ -44,27 +49,22 @@ load lỗi...) trước khi tốn thời gian sinh 500 ảnh thật. Chạy đư
 | Muốn đánh giá thêm nhãn (hiện chỉ 3/5: Atelectasis, Infiltration, Effusion) | Thêm tên vào `target_labels` trong `cas.yaml` (phải là tên `torchxrayvision` biết, vd `Cardiomegaly`) | Không |
 | `num_inference_steps`/`guidance_scale` đổi trong `generate_multilabel.py`/demo thật | Sửa lại 2 giá trị tương ứng trong `cas.yaml` cho khớp | Không |
 | `models/loading.py` hoặc `models/lora.py` đổi API (đổi tên hàm/tham số) | `evaluation/common/model_loader.py` | **Có** — đồng bộ tay |
-| `models/label_encoder.py` đổi số nhãn / thứ tự nhãn | `evaluation/generate_synthetic.py` (import `DEFAULT_LABELS`), và `target_labels` trong `cas.yaml` | Kiểm tra lại, thường không cần sửa code vì `LABEL_NAMES` import trực tiếp từ `label_encoder.py` |
+| `models/label_encoder.py` đổi số nhãn / thứ tự nhãn | `evaluation/generate_synthetic.py` (import `DEFAULT_LABELS`), và `target_labels` trong `cas.yaml` | Thường không — `LABEL_NAMES` import trực tiếp từ `label_encoder.py`, chỉ cần kiểm tra lại |
 
-## 4. Việc KHÔNG cần đụng vào code
+## 4. Việc không cần đụng vào code
 
 - `evaluation/cas/judge.py`, `metrics.py`, `compute_cas.py` — không phụ thuộc
-  cách sinh ảnh, chỉ đọc ảnh + `metadata.csv`. Update checkpoint xong chạy lại
-  y nguyên.
-- `evaluation/common/model_loader.py`, `versioning.py` — chỉ sửa nếu API load
+  cách sinh ảnh, chỉ đọc ảnh + `metadata.csv`. Cập nhật checkpoint xong chạy
+  lại nguyên trạng.
+- `evaluation/common/model_loader.py`, `versioning.py` — chỉ sửa khi API load
   model trong `models/` thực sự đổi chữ ký hàm.
 
 ## 5. Lỗi thường gặp
 
-- **`RuntimeError: Checkpoint không khớp cấu hình LoRA hiện tại`** (từ
-  `load_lora_weights_into`) → `lora_config.json` không khớp `lora-final.safetensors`
-  thật (rank/target_modules lệch). Kiểm tra lại 2 file này có phải cùng 1 lần
-  train hay không.
-- **`RuntimeError: Không inject được adapter nào với target_modules=...`** →
-  `lora_config.json` chứa tên module không tồn tại trong UNet. Xem lại
-  `cross_attention_only` lúc train có khớp `target_modules` đang dùng không.
-- **`FileNotFoundError: Không thấy checkpoint LoRA`** (từ `versioning.py`) →
-  `lora_path` trong `cas.yaml` trỏ sai, hoặc train chưa lưu checkpoint nào.
-- **Nhãn trong `target_labels` không có trong `model.pathologies` của
-  torchxrayvision** (lỗi từ `judge.py`) → tên phải đúng chính tả pathology gốc
-  của torchxrayvision (`Atelectasis`, không phải `atelectasis`).
+| Thông báo lỗi | Nguyên nhân | Cách xử lý |
+|---|---|---|
+| `RuntimeError: Checkpoint không khớp cấu hình LoRA hiện tại` (từ `load_lora_weights_into`) | `lora_config.json` không khớp `lora-final.safetensors` thật (rank/target_modules lệch) | Kiểm tra lại 2 file này có phải cùng 1 lần train hay không |
+| `RuntimeError: Không inject được adapter nào với target_modules=...` | `lora_config.json` chứa tên module không tồn tại trong UNet | Xem lại `cross_attention_only` lúc train có khớp `target_modules` đang dùng không |
+| `FileNotFoundError: Không thấy checkpoint LoRA` (từ `versioning.py`) | `lora_path` trong `cas.yaml` trỏ sai, hoặc train chưa lưu checkpoint nào | Kiểm tra lại đường dẫn và trạng thái training |
+| Nhãn trong `target_labels` không có trong `model.pathologies` của torchxrayvision (lỗi từ `judge.py`) | Sai chính tả tên pathology | Dùng đúng chính tả gốc của torchxrayvision, vd `Atelectasis` (không phải `atelectasis`) |
+

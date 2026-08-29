@@ -4,8 +4,8 @@
 classifier multi-label 100% trên ảnh sinh, rồi test trên cùng một tập ảnh thật
 (`test_real`) mà baseline TRTR dùng.
 
-- **TRTR** (Train Real, Test Real) — baseline/upper-bound, không cần ảnh synthetic.
-- **TSTR** (Train Synthetic, Test Real) — cần ảnh synthetic từ
+- **TRTR** (Train Real, Test Real) không cần ảnh synthetic.
+- **TSTR** (Train Synthetic, Test Real) cần ảnh synthetic từ
   `evaluation/generate_synthetic.py` (chạy với
   `config/evaluation/tstr_generation.yaml`, KHÔNG dùng chung batch ảnh của CAS).
 
@@ -75,14 +75,4 @@ infiltration_effusion/infiltration_effusion_0000.png,infiltration_effusion,1600,
   `config/evaluation/tstr_generation.yaml` (số hiện tại trong file là tỉ lệ ước
   lượng, cần thay bằng số đo thật từ log của `compute_trtr.py`).
 
-## Giới hạn cần ghi rõ khi báo cáo kết quả
 
-Tổng số ảnh synthetic dùng cho TSTR (mặc định trong `tstr_generation.yaml`:
-4.000 ảnh) nhiều khả năng **nhỏ hơn** `train_real` thật (NIH full sau patient
-split thường còn hàng chục nghìn ảnh) — đây là thỏa hiệp bắt buộc do giới hạn
-thời gian sinh ảnh trên GPU consumer, không phải lựa chọn thiết kế lý tưởng.
-Nếu macro-AUC của TSTR thấp hơn TRTR đáng kể, cần cân nhắc khả năng nguyên
-nhân đến từ **thiếu dữ liệu train** chứ không hẳn ảnh synthetic kém chất lượng
-— nếu có thời gian, thử tăng dần `count` và xem macro-AUC TSTR có hội tụ gần
-TRTR hơn không (nếu có, ủng hộ giả thuyết "thiếu dữ liệu"; nếu không hội tụ dù
-tăng dữ liệu, ủng hộ giả thuyết "ảnh synthetic thiếu tín hiệu bệnh lý thật").

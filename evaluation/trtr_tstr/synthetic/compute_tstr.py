@@ -1,18 +1,5 @@
 from __future__ import annotations
 
-"""
-Train Synthetic -> Test Real (TSTR). Cần ảnh synthetic đã sinh sẵn (xem
-evaluation/generate_synthetic.py) + file manifest labels.csv (xem
-synthetic_dataset.py để biết đúng format cần xuất ra).
-
-BẮT BUỘC chạy compute_trtr.py TRƯỚC ít nhất 1 lần -- TSTR dùng lại đúng
-test_real/val_real đã chốt ở đó, không tự split lại.
-
-    python -m evaluation.trtr_tstr.compute_tstr \\
-        --config config/evaluation/trtr_tstr.yaml \\
-        --synthetic-manifest out/synthetic/trtr_tstr/labels.csv
-"""
-
 import argparse
 import json
 from pathlib import Path

@@ -1,15 +1,3 @@
-"""
-Xác định "version_tag" — nhãn định danh 1 lần train/checkpoint — dùng để tách
-thư mục output của các lần chạy generate_synthetic.py / compute_*.py, tránh lần
-chạy sau (checkpoint mới) ghi đè mất kết quả của checkpoint cũ.
-
-LƯU Ý: pipeline train hiện tại luôn lưu checkpoint cuối với TÊN FILE CỐ ĐỊNH
-("lora-final.safetensors", "label_encoder-final.safetensors") — khác với thiết
-kế cũ (checkpoint-4000.safetensors, có số step trong tên). Vì vậy KHÔNG thể suy
-version_tag từ tên file như trước; thay vào đó dùng thời điểm sửa đổi (mtime)
-của file checkpoint, kết hợp tên thư mục cha, để mỗi lần train mới (ghi đè file)
-tự động ra 1 version_tag khác.
-"""
 import os
 import time
 

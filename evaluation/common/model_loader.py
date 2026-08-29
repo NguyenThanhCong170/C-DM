@@ -1,10 +1,3 @@
-"""
-Load base model (SD1.x) + LoRA + label encoder — dùng chung cho mọi metric cần
-sinh ảnh synthetic có điều kiện nhãn.
-
-Sao y (không đổi hành vi) chuỗi load trong generate_multilabel.py, gói lại
-thành 1 hàm để không phải lặp lại ở từng script sinh ảnh.
-"""
 import os
 from dataclasses import dataclass
 from typing import Dict, Optional

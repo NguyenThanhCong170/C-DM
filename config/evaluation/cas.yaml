@@ -1,25 +1,15 @@
-# Cấu hình đánh giá CAS (Classification Accuracy Score) cho model multi-label
-# 5 nhãn: No Finding, Infiltration, Effusion, Atelectasis, Others
-#
-#   python -m evaluation.generate_synthetic --config config/evaluation/cas.yaml
-#   python -m evaluation.cas.compute_cas    --config config/evaluation/cas.yaml
-
 model:
   pretrained_dir: "sd15"
   lora_path: "out/multilabel/lora-final.safetensors"
   lora_config_path: "out/multilabel/lora_config.json"
   label_encoder_path: "out/multilabel/label_encoder-final.safetensors"
-  version_tag: null          # null = tự suy ra từ thư mục checkpoint + thời điểm sửa file
-                              # gần nhất (vd "multilabel_20260829-1530"). Checkpoint luôn
-                              # ghi đè cùng 1 tên file ("lora-final.safetensors") nên KHÔNG
-                              # thể suy version từ tên file như thiết kế cũ.
+  version_tag: null
+
   device: "cuda"
   dtype: "fp16"
   variant: "fp16"
 
-# 3 nhãn thật sự được đánh giá bởi giám khảo (torchxrayvision). Tên khớp CHÍNH
-# XÁC cả model.pathologies của torchxrayvision LẪN LABEL_NAMES của label_encoder
-# — không cần bảng ánh xạ tên qua lại như thiết kế conditioning-bằng-prompt cũ.
+# 3 nhãn thật sự được đánh giá
 target_labels:
   - Atelectasis
   - Infiltration
@@ -38,21 +28,20 @@ generation:
     - name: "effusion"
       labels: ["Effusion"]
 
-  num_inference_steps: 25      # khớp default sample_from_labels() / generate_multilabel.py
-  guidance_scale: 4.0          # khớp default generate_multilabel.py (= validation_guidance_scale
-                                # trong multilabel.yaml, nhất quán giữa validation lúc train và CAS)
+  num_inference_steps: 25      
+  guidance_scale: 4.0         
+  
   height: 512
   width: 512
 
-  output_dir: "data/synthetic"       # ảnh + metadata nằm ở data/synthetic/<version_tag>/...
+  output_dir: "data/synthetic"       
   metadata_filename: "metadata.csv"
 
 judge:
-  model_name: "densenet121-res224-nih"   # torchxrayvision pretrained, train trên NIH
-  use_op_threshs: true                   # dùng threshold hiệu chỉnh sẵn của tác giả model
-  threshold_overrides: {}                # để trống = dùng op_threshs mặc định
+  model_name: "densenet121-res224-nih"   
+  use_op_threshs: true                   
+  threshold_overrides: {}                
 
 evaluation:
-  results_dir: "reports/cas"         # NGOÀI thư mục data/ (đã bị .gitignore chặn toàn bộ)
-                                      # -> báo cáo nằm ở reports/cas/<version_tag>/, COMMIT được
-  bootstrap_iterations: 1000         # tính CI 95% cho AUC vì n/combo chỉ 125
+  results_dir: "reports/cas"
+  bootstrap_iterations: 1000

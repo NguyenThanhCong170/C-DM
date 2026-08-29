@@ -1,9 +1,3 @@
-"""
-Wrapper cho model giám khảo độc lập (TorchXRayVision densenet121-res224-nih).
-
-Model này KHÔNG biết vector nhãn gốc của ảnh — chỉ nhận pixel và trả về
-xác suất sigmoid cho từng bệnh, dùng để đối chiếu ngược lại với ground truth.
-"""
 import numpy as np
 import skimage.io
 import torch
@@ -35,7 +29,7 @@ class Judge:
             if label in self.pathologies:
                 self.thresholds[self.pathologies.index(label)] = value
 
-        # Ảnh synthetic của bạn là 512x512 -> BẮT BUỘC resize về đúng input size
+        # Ảnh synthetic 512x512
         # của model (224) sau khi center-crop vuông.
         self._transform = torchvision.transforms.Compose(
             [xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(224)]

@@ -1,25 +1,5 @@
 from __future__ import annotations
 
-"""
-Dataset đọc ảnh synthetic do evaluation/generate_synthetic.py xuất ra.
-
-FORMAT THẬT của metadata.csv (đã đối chiếu với evaluation/generate_synthetic.py,
-KHÔNG còn là hợp đồng tạm định nghĩa nữa):
-
-    <output_dir>/<version_tag>/
-    ├── <combo_name>/*.png
-    └── metadata.csv   -- cột: filepath, combo, seed, "gt_No Finding",
-                           "gt_Infiltration", "gt_Effusion", "gt_Atelectasis",
-                           "gt_Others" (tên cột nhãn có tiền tố "gt_", đúng thứ
-                           tự dataset.nih_multilabel.LABEL_NAMES, giá trị 0/1 —
-                           có thể là nhãn mềm trong [0,1] nếu sinh bằng vector
-                           không phải one-hot).
-
-`filepath` trong CSV là đường dẫn TƯƠNG ĐỐI so với thư mục CHỨA metadata.csv
-(không phải tương đối CWD lúc chạy script) — _read_manifest() tự resolve theo
-đúng quy ước này.
-"""
-
 import csv
 from pathlib import Path
 from typing import Optional, Union
@@ -45,8 +25,6 @@ def _read_manifest(manifest_path: Union[str, Path]) -> list[dict]:
         raise ValueError(
             f"{manifest_path} thiếu cột {missing_cols}.\n"
             f"Cần đủ: filepath, {label_cols}\n"
-            "-> Đây có phải metadata.csv do evaluation/generate_synthetic.py xuất ra không? "
-            "Nếu bạn tự tạo file thủ công, đặt đúng tên cột như trên."
         )
 
     base_dir = manifest_path.parent
@@ -56,17 +34,12 @@ def _read_manifest(manifest_path: Union[str, Path]) -> list[dict]:
 
 
 class SyntheticManifestDataset(Dataset):
-    """Cùng interface với NIHMultiLabelDataset (__getitem__ trả {"pixel_values","labels"},
-    có make_balanced_sampler) để classifier.train_one() dùng chung được cho cả TRTR/TSTR."""
 
     def __init__(
         self,
         manifest_path: Union[str, Path],
         size: int = 512,
-        # Mặc định KHÔNG percentile-normalize: hàm này vốn để sửa dải sáng lệch của ảnh
-        # X-quang DICOM 16-bit thật; ảnh synthetic đã ở dạng 8-bit "bình thường" sau khi
-        # decode qua VAE nên áp lại percentile normalize dễ làm lệch tương phản không cần thiết.
-        # Đổi thành True nếu muốn khớp tuyệt đối pipeline tiền xử lý ảnh thật.
+
         use_percentile_norm: bool = False,
         verbose: bool = True,
     ):

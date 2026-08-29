@@ -1,15 +1,5 @@
 from __future__ import annotations
 
-"""
-Classifier dùng để đánh giá TRTR/TSTR: DenseNet-121 multi-label, output khớp
-số chiều dataset.nih_multilabel.LABEL_NAMES (mặc định 5: No Finding,
-Infiltration, Effusion, Atelectasis, Others).
-
-train_one() là hàm DUY NHẤT dùng cho cả 2 kịch bản train — compute_trtr.py và
-compute_tstr.py chỉ khác nhau ở train_ds truyền vào, mọi thứ còn lại y hệt để
-đảm bảo so sánh công bằng.
-"""
-
 import gc
 import random
 import time
@@ -64,12 +54,7 @@ def train_one(
     use_amp: bool = True,
     use_data_parallel: bool = True,
 ) -> dict:
-    """Train 1 classifier trên `train_ds`, chọn checkpoint tốt nhất theo val_loss,
-    trả về metrics (macro-AUC, per-label AUC, macro-F1) đo trên `test_ds`.
-
-    `train_ds` là điểm khác biệt DUY NHẤT giữa TRTR (ảnh thật) và TSTR (ảnh synthetic)
-    -- xem compute_trtr.py / compute_tstr.py.
-    """
+   
     set_seed(seed)
     checkpoint_dir = output_dir / "checkpoints"
     logs_dir = output_dir / "logs"

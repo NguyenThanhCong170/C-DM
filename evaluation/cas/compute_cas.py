@@ -1,10 +1,3 @@
-"""
-Chạy giám khảo trên toàn bộ ảnh synthetic đã sinh (evaluation/generate_synthetic.py),
-đối chiếu với ground truth, xuất báo cáo CAS (json) + bảng dự đoán chi tiết (csv).
-
-Cách chạy (sau khi đã chạy evaluation/generate_synthetic.py với CÙNG config):
-    python -m evaluation.cas.compute_cas --config config/evaluation/cas.yaml
-"""
 import argparse
 import csv
 import json
@@ -74,8 +67,7 @@ def main():
         y_true.append(gt_vec)
         y_prob.append(prob_vec)
         y_pred.append(pred_vec)
-        # Ground truth no-finding lấy TRỰC TIẾP từ metadata (nhãn tường minh của
-        # label_encoder), không phải suy ra như thiết kế cũ.
+        
         gt_no_finding.append(int(round(float(row["gt_No Finding"]))))
 
         detail_rows.append(

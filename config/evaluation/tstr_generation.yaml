@@ -1,13 +1,3 @@
-# Sinh ảnh synthetic cho TSTR (evaluation/trtr_tstr/) — KHÔNG dùng chung batch
-# ảnh của CAS (config/evaluation/cas.yaml): CAS cần 4 combo đơn-bệnh "tinh khiết"
-# số lượng đều nhau để giám khảo dễ chấm; TSTR cần tập train mô phỏng ĐÚNG PHÂN
-# PHỐI NHÃN THẬT (nhiều No Finding, có đồng mắc nhiều bệnh) để so sánh công bằng
-# với train_real.
-#
-#   python -m evaluation.generate_synthetic --config config/evaluation/tstr_generation.yaml
-#   python -m evaluation.trtr_tstr.compute_tstr --config config/evaluation/trtr_tstr.yaml \
-#       --synthetic-manifest data/synthetic_tstr/<version_tag_in_ra_khi_chay_lenh_tren>/metadata.csv
-
 model:
   pretrained_dir: "sd15"
   lora_path: "out/multilabel/lora-final.safetensors"
@@ -24,24 +14,9 @@ generation:
   guidance_scale: 4.0
   height: 512
   width: 512
-  output_dir: "data/synthetic_tstr"    # KHÁC data/synthetic của CAS -> không đè lẫn nhau
+  output_dir: "data/synthetic_tstr"
   metadata_filename: "metadata.csv"
 
-  # -------------------------------------------------------------------------
-  # QUAN TRỌNG — "count" dưới đây là TỈ LỆ XẤP XỈ dựa trên hiểu biết chung về
-  # phân phối bệnh trong NIH ChestX-ray14, KHÔNG PHẢI số đo thực tế từ dữ liệu
-  # của bạn. Trước khi chạy full, thay bằng số liệu THẬT: chạy
-  # `compute_trtr.py` trước (NIHMultiLabelDataset tự in ra số lượng ảnh mỗi
-  # nhãn của train_real ngay khi load), rồi tính lại theo công thức:
-  #     count_combo = (số ảnh thật của nhãn/tổ hợp đó / tổng số ảnh train_real)
-  #                   * TOTAL_MONG_MUỐN
-  # TOTAL_MONG_MUỐN nên >= kích thước train_real để so sánh công bằng (README
-  # trtr_tstr), nhưng con số dưới đây (4000 ảnh) là mức THỎA HIỆP cho khả thi
-  # thời gian GPU (RTX 5050) — 4000 ảnh x ~25 bước ước tính vài giờ, còn khớp
-  # đúng train_real (có thể vài chục nghìn ảnh) sẽ mất nhiều giờ đến vài ngày.
-  # Đây là 1 giới hạn thật của thí nghiệm, cần ghi rõ trong báo cáo, không nên
-  # âm thầm bỏ qua.
-  # -------------------------------------------------------------------------
   combos:
     - name: "no_finding"
       labels: ["No Finding"]

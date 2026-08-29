@@ -1,15 +1,5 @@
 from __future__ import annotations
 
-"""
-Train Real -> Test Real (TRTR): baseline "upper bound" để so sánh với TSTR.
-Không cần ảnh synthetic -- chạy được ngay bất cứ lúc nào.
-
-    python -m evaluation.trtr_tstr.compute_trtr --config config/evaluation/trtr_tstr.yaml
-
-Lưu test_pids.json / val_pids.json vào output_dir để compute_tstr.py BẮT BUỘC
-dùng lại đúng test_real/val_real này -- đảm bảo 2 kịch bản so sánh công bằng.
-"""
-
 import argparse
 import json
 from pathlib import Path
@@ -59,7 +49,6 @@ def main():
                                      max_per_label=cfg.get("max_per_label_train"),
                                      cache_dir=cfg.get("cache_dir"), seed=cfg["seed"])
 
-    # Cố định test_real/val_real để compute_tstr.py dùng lại y hệt -- KHÔNG được đổi
     (output_dir / "test_pids.json").write_text(json.dumps(test_pids))
     (output_dir / "val_pids.json").write_text(json.dumps(val_pids))
 
