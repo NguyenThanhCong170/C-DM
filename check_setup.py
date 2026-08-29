@@ -35,6 +35,10 @@ def main() -> int:
     p.add_argument("--config", default="config/multilabel.yaml")
     p.add_argument("--skip-train-step", action="store_true",
                    help="bỏ qua bước 6 (thử 1 optimizer step)")
+    p.add_argument("-o", "--set", dest="overrides", action="append", default=[],
+                   metavar="KEY=VALUE",
+                   help="ghi đè một khoá config, lặp lại được. "
+                        "VD: -o train_batch_size=16 -o data_root=/data/nih")
     args = p.parse_args()
 
     cfg_path = Path(args.config)
@@ -42,6 +46,13 @@ def main() -> int:
         print(f"✗ Không thấy {cfg_path}")
         return 1
     cfg = yaml.safe_load(open(cfg_path, encoding="utf-8")) or {}
+
+    for item in args.overrides:
+        if "=" not in item:
+            p.error(f"--set cần dạng KEY=VALUE, nhận '{item}'")
+        key, _, raw = item.partition("=")
+        cfg[key.strip()] = yaml.safe_load(raw)      # YAML: 16 -> int, 1e-4 -> float, null -> None
+        print(f"[config] ghi đè {key.strip()} = {cfg[key.strip()]!r}")
 
     try:
         # ------------------------------------------------------------------
