@@ -1,0 +1,73 @@
+"""
+Wrapper cho model giám khảo độc lập (TorchXRayVision densenet121-res224-nih).
+
+Model này KHÔNG biết vector nhãn gốc của ảnh — chỉ nhận pixel và trả về
+xác suất sigmoid cho từng bệnh, dùng để đối chiếu ngược lại với ground truth.
+"""
+import numpy as np
+import skimage.io
+import torch
+import torchvision.transforms
+import torchxrayvision as xrv
+
+
+class Judge:
+    def __init__(self, model_name: str = "densenet121-res224-nih",
+                 use_op_threshs: bool = True,
+                 threshold_overrides: dict | None = None,
+                 device: str = "cpu"):
+        self.device = device
+        self.model = xrv.models.get_model(model_name, from_hf_hub=True)
+        self.model.to(device).eval()
+
+        self.pathologies = list(self.model.pathologies)
+
+        # Ngưỡng dương tính do tác giả TorchXRayVision hiệu chỉnh sẵn (op_threshs).
+        # Đây là ngưỡng calibrate trên ẢNH THẬT — cần lưu ý domain shift khi áp
+        # dụng cho ảnh synthetic (xem cas/README.md phần "Giới hạn của CAS").
+        if use_op_threshs and getattr(self.model, "op_threshs", None) is not None:
+            self.thresholds = np.array(self.model.op_threshs)
+        else:
+            self.thresholds = np.full(len(self.pathologies), 0.5)
+
+        threshold_overrides = threshold_overrides or {}
+        for label, value in threshold_overrides.items():
+            if label in self.pathologies:
+                self.thresholds[self.pathologies.index(label)] = value
+
+        # Ảnh synthetic của bạn là 512x512 -> BẮT BUỘC resize về đúng input size
+        # của model (224) sau khi center-crop vuông.
+        self._transform = torchvision.transforms.Compose(
+            [xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(224)]
+        )
+
+    def _preprocess(self, image_path: str) -> torch.Tensor:
+        img = skimage.io.imread(image_path)
+        img = xrv.datasets.normalize(img, 255)
+        if img.ndim > 2:
+            img = img[:, :, 0]
+        img = img[None, :, :]
+        img = self._transform(img)
+        return torch.from_numpy(img).unsqueeze(0).float()
+
+    def predict(self, image_path: str) -> dict:
+        """Trả về dict {pathology_name: (prob, is_positive)} cho TẤT CẢ 18 nhãn
+        mà model biết. Bên compute_cas.py sẽ chỉ lấy subset cần dùng."""
+        tensor = self._preprocess(image_path).to(self.device)
+        with torch.no_grad():
+            probs = self.model(tensor).cpu().numpy()[0]
+
+        result = {}
+        for name, prob, thresh in zip(self.pathologies, probs, self.thresholds):
+            result[name] = {"prob": float(prob), "positive": bool(prob >= thresh)}
+        return result
+
+    def predict_subset(self, image_path: str, labels: list[str]) -> dict:
+        full = self.predict(image_path)
+        missing = [l for l in labels if l not in full]
+        if missing:
+            raise ValueError(
+                f"Nhãn {missing} không nằm trong danh sách pathology của model "
+                f"({self.pathologies}). Kiểm tra lại tên nhãn trong config."
+            )
+        return {l: full[l] for l in labels}

@@ -7,3 +7,9 @@ pyyaml
 
 gradio>=5
 wandb
+
+# Evaluation (CAS — evaluation/cas/)
+torchxrayvision>=1.2
+scikit-learn>=1.3
+scikit-image>=0.21
+tqdm>=4.65

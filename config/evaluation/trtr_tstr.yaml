@@ -1,0 +1,41 @@
+# ============================================================================
+# Cấu hình đánh giá TRTR vs TSTR (Train Real/Synthetic - Test Real)
+#
+#   python -m evaluation.trtr_tstr.compute_trtr --config config/evaluation/trtr_tstr.yaml
+#   python -m evaluation.trtr_tstr.compute_tstr --config config/evaluation/trtr_tstr.yaml \
+#       --synthetic-manifest out/synthetic/trtr_tstr/labels.csv
+#   python -m evaluation.trtr_tstr.compare \
+#       --trtr out/eval/trtr_tstr/trtr.json --tstr out/eval/trtr_tstr/tstr.json
+# ============================================================================
+
+# --- Dữ liệu real (NIH ChestX-ray14) ----------------------------------------
+data_root: "./data/nih"                 # thư mục chứa Data_Entry_2017.csv, images_001..012/
+output_dir: "./out/eval/trtr_tstr"
+
+# --- Nhãn: khớp dataset/nih_multilabel.py (LABEL_NAMES, 5 chiều) ------------
+# Không khai báo lại ở đây -- lấy trực tiếp từ dataset.nih_multilabel.LABEL_NAMES
+# để tránh lệch nhãn nếu nhóm đổi định nghĩa.
+
+# --- Ảnh & split --------------------------------------------------------------
+img_size: 512
+seed: 42
+num_seeds: 1               # tăng lên 3+ để có mean ± std, đổi lại tốn thời gian hơn
+test_ratio: 0.2             # tỉ lệ patient dùng cho test_real (KHÔNG đổi giữa TRTR/TSTR)
+val_ratio: 0.05              # khớp val_ratio trong config/multilabel.yaml
+
+# --- Cân bằng lớp khi TRAIN (chỉ áp dụng cho train, val/test giữ nguyên) ----
+max_per_label_train:
+  No Finding: 15000
+  Others: 20000
+balance_beta: 0.5             # khớp balance_beta trong config/multilabel.yaml
+
+# --- Tối ưu classifier ---------------------------------------------------------
+batch_size: 16
+num_workers: 2
+epochs: 15
+lr: 0.0001
+use_amp: true                   # mixed precision, tăng tốc trên GPU
+use_data_parallel: true          # tận dụng nhiều GPU qua nn.DataParallel nếu có
+
+# --- Cache ảnh tiền xử lý (tăng tốc epoch sau) --------------------------------
+cache_dir: "./cache512"
