@@ -14,7 +14,9 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 import torchvision.transforms as T
-from PIL import Image
+from uuid import uuid4
+
+from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset, WeightedRandomSampler
 
 IMG_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
@@ -159,6 +161,15 @@ class NIHMultiLabelDataset(Dataset):
         if not file_index:
             raise FileNotFoundError(f"Không thấy ảnh nào dưới {data_root}")
 
+        if view_position is not None:
+            _vp = str(view_position).strip().upper()
+            if _vp in ("", "NONE", "NULL"):
+                view_position = None            # YAML viết None/"" -> coi như không lọc
+            elif _vp not in ("PA", "AP"):
+                raise ValueError(
+                    f"view_position phải là 'PA', 'AP' hoặc null — nhận {view_position!r}. "
+                    "Trong YAML, null viết là `null` hoặc `~`, KHÔNG phải `None`.")
+
         rows = read_data_entry(csv_path)
         rng = random.Random(seed)
 
@@ -248,17 +259,37 @@ class NIHMultiLabelDataset(Dataset):
     def _cached_path(self, path: Path) -> Path:
         return self.cache_dir / f"{path.stem}_{self.size}.png"
 
+    def _save_cache(self, img: Image.Image, cached: Path) -> None:
+        """
+        Ghi cache NGUYÊN TỬ: ra file tạm rồi os.replace().
+
+        Với num_workers > 1 và WeightedRandomSampler (lấy mẫu có hoàn lại), hai
+        worker có thể cùng ghi một file. `Image.save()` thẳng vào đích không nguyên
+        tử, nên worker khác đọc phải file ghi dở -> UnidentifiedImageError giữa run.
+        os.replace() là nguyên tử trên cùng filesystem, nên file đích luôn hoặc
+        chưa tồn tại, hoặc hoàn chỉnh.
+        """
+        tmp = cached.with_name(f".{cached.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+        try:
+            img.convert("L").save(tmp, format="PNG", optimize=False)
+            os.replace(tmp, cached)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
     def _load_image(self, path: Path):
         if self.cache_dir is not None:
             cached = self._cached_path(path)
             if cached.is_file():
-                return Image.open(cached).convert("RGB")
+                try:
+                    return Image.open(cached).convert("RGB")
+                except (OSError, UnidentifiedImageError):
+                    pass        # cache hỏng từ lần chạy trước -> dựng lại từ ảnh gốc
             img = preprocess_xray_to_rgb(path, size=self.size,
                                          use_percentile_norm=self.use_percentile_norm)
-            try:
-                img.convert("L").save(cached, optimize=False)
-            except OSError:
-                pass
+            self._save_cache(img, cached)
             return img
         return preprocess_xray_to_rgb(path, size=self.size,
                                       use_percentile_norm=self.use_percentile_norm)
