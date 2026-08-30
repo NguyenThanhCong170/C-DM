@@ -9,6 +9,8 @@ Sinh ảnh X-quang từ vector nhãn multi-hot.
 """
 
 import argparse
+import math
+import time
 from pathlib import Path
 
 import torch
@@ -31,7 +33,13 @@ def parse_args():
     p.add_argument("--labels", default="No Finding",
                    help=f"tên nhãn ngăn bằng '|'. Hợp lệ: {list(LABEL_NAMES)}")
     p.add_argument("--vector", default=None, help="thay --labels bằng 5 số, vd 0,1,1,0,0")
-    p.add_argument("-n", "--num-images", type=int, default=4)
+    p.add_argument("-n", "--num-images", type=int, default=4,
+                   help="TỔNG số ảnh cần sinh")
+    p.add_argument("--batch-size", type=int, default=8,
+                   help="số ảnh mỗi lượt qua U-Net. CFG nhân đôi con số này. "
+                        "Giảm nếu OOM, tăng nếu còn dư VRAM")
+    p.add_argument("--grid", action="store_true",
+                   help="ghép tất cả ảnh thành một tấm contact sheet để xem nhanh")
     p.add_argument("--steps", type=int, default=25)
     p.add_argument("--guidance", type=float, default=4.0)
     p.add_argument("--resolution", type=int, default=512)
@@ -82,21 +90,59 @@ def main():
     print(f"[cond] {dict(zip(LABEL_NAMES, y.tolist()))}")
 
     outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
+    # MỘT generator dùng chung cho mọi lô -> mỗi lô lấy nhiễu mới, không lặp lại
     generator = torch.Generator(device=args.device).manual_seed(args.seed)
+    components = LabelSDComponents(unet=unet, vae=vae, label_encoder=label_encoder)
 
-    images = sample_from_labels(
-        LabelSDComponents(unet=unet, vae=vae, label_encoder=label_encoder),
-        y.unsqueeze(0).expand(args.num_images, -1),
-        num_images=args.num_images,
-        height=args.resolution, width=args.resolution,
-        num_inference_steps=args.steps,
-        guidance_scale=args.guidance,
-        generator=generator, device=args.device, dtype=dtype, scheduler=scheduler,
-    )
-    for i, img in enumerate(images):
-        path = outdir / f"{tag}_seed{args.seed}_{i:02d}.png"
-        img.save(path)
-        print(f"[save] {path}")
+    bs = max(1, min(args.batch_size, args.num_images))
+    n_batches = math.ceil(args.num_images / bs)
+    print(f"[gen] {args.num_images} ảnh | {n_batches} lô x {bs} "
+          f"| {args.steps} bước | cfg {args.guidance}")
+
+    all_images, done, t_start = [], 0, time.perf_counter()
+    while done < args.num_images:
+        k = min(bs, args.num_images - done)
+        t0 = time.perf_counter()
+        imgs = sample_from_labels(
+            components,
+            y.unsqueeze(0).expand(k, -1),
+            num_images=k,
+            height=args.resolution, width=args.resolution,
+            num_inference_steps=args.steps,
+            guidance_scale=args.guidance,
+            generator=generator, device=args.device, dtype=dtype, scheduler=scheduler,
+        )
+        for j, img in enumerate(imgs):
+            img.save(outdir / f"{tag}_seed{args.seed}_{done + j:03d}.png")
+        all_images.extend(imgs)
+        done += k
+        dt = time.perf_counter() - t0
+        eta = (time.perf_counter() - t_start) / done * (args.num_images - done)
+        print(f"[gen] {done}/{args.num_images}  ({dt:.1f}s cho lô này"
+              f"{f', còn ~{eta:.0f}s' if done < args.num_images else ''})")
+        if args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+    print(f"[done] {args.num_images} ảnh trong {time.perf_counter()-t_start:.1f}s -> {outdir}")
+
+    if args.grid:
+        path = outdir / f"{tag}_seed{args.seed}_grid.png"
+        save_contact_sheet(all_images, path)
+        print(f"[grid] {path}")
+
+
+def save_contact_sheet(images, path, thumb: int = 256, cols: int = None) -> None:
+    """Ghép ảnh thành một tấm lưới để duyệt nhanh 50 ảnh cùng lúc."""
+    from PIL import Image
+
+    n = len(images)
+    cols = cols or min(10, math.ceil(math.sqrt(n)) + 2)
+    rows = math.ceil(n / cols)
+    sheet = Image.new("RGB", (cols * thumb, rows * thumb), (16, 16, 16))
+    for i, im in enumerate(images):
+        sheet.paste(im.resize((thumb, thumb), Image.LANCZOS),
+                    ((i % cols) * thumb, (i // cols) * thumb))
+    sheet.save(path)
 
 
 if __name__ == "__main__":
