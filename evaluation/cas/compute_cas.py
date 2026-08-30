@@ -31,7 +31,7 @@ def main():
     gen = cfg["generation"]
 
     version_tag = resolve_version_tag(cfg)
-    metadata_path = os.path.join(gen["output_dir"], version_tag, gen.get("metadata_filename", "metadata.csv"))
+    metadata_path = os.path.join(gen["output_dir"], "multilabel_att1_att2", gen.get("metadata_filename", "metadata.csv"))
     results_dir = os.path.join(cfg["evaluation"]["results_dir"], version_tag)
     os.makedirs(results_dir, exist_ok=True)
     print(f"[CAS] version_tag = '{version_tag}' -> đọc {metadata_path}, ghi kết quả vào {results_dir}/")
