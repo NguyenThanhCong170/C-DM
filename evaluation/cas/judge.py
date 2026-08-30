@@ -11,7 +11,9 @@ class Judge:
                  threshold_overrides: dict | None = None,
                  device: str = "cpu"):
         self.device = device
-        self.model = xrv.models.get_model(model_name, from_hf_hub=True)
+        # get_model(weights, **kwargs) đẩy thẳng kwargs vào DenseNet.__init__,
+        # vốn KHÔNG có tham số from_hf_hub — trọng số tải từ model_urls, không qua HF Hub.
+        self.model = xrv.models.get_model(model_name)
         self.model.to(device).eval()
 
         self.pathologies = list(self.model.pathologies)
