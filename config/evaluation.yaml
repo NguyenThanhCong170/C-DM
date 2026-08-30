@@ -1,0 +1,74 @@
+# ---------------------------------------------------------------------------
+# Cấu hình chung cho toàn bộ pipeline đánh giá: TRTR / TSTR / CAS
+#
+# LƯU Ý YAML 1.1: số thực PHẢI có dấu chấm thập phân.
+#   lr: 1e-4    -> bị đọc thành CHUỖI "1e-4" -> AdamW lỗi TypeError
+#   lr: 1.0e-4  -> đúng, là float
+# ---------------------------------------------------------------------------
+
+data_root: "./data/nih"          # chứa Data_Entry_2017.csv và images_00*/images
+csv_path: null                   # null -> data_root/Data_Entry_2017.csv
+output_dir: "./out/eval"
+cache_dir: "./cache512"          # cache ảnh thật đã tiền xử lý (dùng chung với train diffusion)
+img_size: 512
+seed: 42
+device: "cuda"
+
+# Chia theo BỆNH NHÂN, không theo ảnh — một bệnh nhân có nhiều ảnh, chia theo
+# ảnh sẽ rò rỉ giải phẫu của cùng người sang cả train lẫn test.
+split:
+  test_ratio: 0.2
+  val_ratio: 0.05                # 5% của phần còn lại sau khi cắt test
+
+# Trần số ảnh cho MỖI NHÃN ở tập train THẬT.
+#
+# 1000/nhãn x 5 nhãn -> TỐI ĐA 5000 ảnh, nhưng thực tế sẽ ÍT HƠN: đây là bài
+# toán multi-label, một ảnh Effusion+Atelectasis tiêu tốn hạn mức của cả hai
+# nhãn cùng lúc. Xem dòng "[Dataset] ... ảnh" script in ra để biết con số thật.
+# Bộ lọc ưu tiên giữ ảnh nhiều nhãn (xem _apply_caps trong nih_multilabel.py),
+# nên các tổ hợp đồng mắc hiếm không bị cắt mất.
+real_train:
+  max_per_label:
+    No Finding: 1000
+    Infiltration: 1000
+    Effusion: 1000
+    Atelectasis: 1000
+    Others: 1000
+
+# Trần cho tập val/test THẬT. Val bị chấm lại sau MỖI epoch nên cắt bớt tiết
+# kiệm đáng kể; test chỉ chấm đúng một lần ở cuối nên để null (dùng toàn bộ)
+# cho con số báo cáo có đủ ý nghĩa thống kê.
+eval_sets:
+  val_max_images: 3000
+  test_max_images: null
+
+classifier:
+  batch_size: 32                 # DenseNet-121 @512, AMP fp16, A40 44GB
+  num_workers: 8
+  epochs: 15
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  balance_beta: 0.5              # 1.0 = cân bằng hoàn toàn, 0.0 = giữ phân phối gốc
+  pretrained: true               # khởi tạo từ ImageNet
+  use_amp: true
+  early_stop_patience: 4         # số epoch val macro-AUC không cải thiện thì dừng
+  use_data_parallel: true
+
+generation:
+  base: "./sd15"
+  lora: "./out/multilabel_att1_att2/lora-9000.safetensors"
+  lora_config: "./out/multilabel_att1_att2/lora_config.json"
+  label_encoder: "./out/multilabel_att1_att2/label_encoder-9000.safetensors"
+  vae_decoder: null              # checkpoint decoder VAE đã tinh chỉnh, nếu có
+  num_images: 5000               # khớp cỡ tập train thật -> TSTR vs TRTR công bằng
+  batch_size: 32                 # điểm KHỞI ĐẦU; script tự lùi khi OOM (xem --no-autobatch)
+  steps: 25
+  guidance_scale: 4.0
+  resolution: 512
+  dtype: "fp16"
+  seed: 1234
+  outdir: "./out/eval/synthetic"
+
+# Ảnh synthetic có đi qua percentile_normalize giống ảnh thật không.
+# true = cùng một đường ống tiền xử lý cho cả hai nguồn (khuyến nghị: giữ công bằng).
+synthetic_percentile_norm: true

@@ -28,3 +28,6 @@ cache*/
 # Log training + wandb offline
 logs/
 wandb/
+
+# Other
+Users/
