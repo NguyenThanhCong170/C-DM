@@ -1,8 +1,8 @@
 model:
   pretrained_dir: "sd15"
-  lora_path: "out/multilabel/lora-final.safetensors"
-  lora_config_path: "out/multilabel/lora_config.json"
-  label_encoder_path: "out/multilabel/label_encoder-final.safetensors"
+  lora_path: "out/multilabel_att1_att2/lora-9000.safetensors"
+  lora_config_path: "out/multilabel_att1_att2/lora_config.json"
+  label_encoder_path: "out/multilabel_att1_att2/label_encoder-9000.safetensors"
   version_tag: null
 
   device: "cuda"
