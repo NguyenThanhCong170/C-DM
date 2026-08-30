@@ -161,12 +161,17 @@ def _main_calibrate():
     import yaml
 
     from dataset.nih_multilabel import NIHMultiLabelDataset
-    from ..trtr_tstr.TSTR.splits import patient_level_split_3way
+    from ..trtr_tstr.splits import patient_level_split_3way
 
     p = argparse.ArgumentParser(description="Hiệu chỉnh ngưỡng judge TRTR trên val thật")
     p.add_argument("--config", default="config/evaluation/cas.yaml")
     p.add_argument("--trtr-config", default="config/evaluation/trtr_tstr.yaml")
+    p.add_argument("--calibrate", action="store_true",
+                   help="BẮT BUỘC — xác nhận chạy hiệu chỉnh (job nặng, quét toàn bộ tập val)")
     args = p.parse_args()
+    if not args.calibrate:
+        p.error("thiếu --calibrate. Module này chỉ dùng để hiệu chỉnh ngưỡng, "
+                "thêm cờ này để xác nhận.")
 
     cas_cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
     trtr_cfg = yaml.safe_load(open(args.trtr_config, encoding="utf-8"))
