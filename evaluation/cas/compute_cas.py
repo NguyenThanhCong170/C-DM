@@ -46,12 +46,27 @@ def main():
 
     base_dir = os.path.dirname(metadata_path)
 
-    judge = Judge(
-        model_name=cfg["judge"]["model_name"],
-        use_op_threshs=cfg["judge"]["use_op_threshs"],
-        threshold_overrides=cfg["judge"].get("threshold_overrides") or {},
-        device=cfg["model"]["device"],
-    )
+    jc = cfg["judge"]
+    judge_type = jc.get("type", "xrv")
+    if judge_type == "trtr":
+        # Classifier 5 lớp của chính dự án — khớp đúng không gian nhãn, không phải gộp 18->5
+        from evaluation.cas.judge_trtr import TRTRJudge
+        judge = TRTRJudge(
+            checkpoint=jc["checkpoint"],
+            img_size=jc.get("img_size", 512),
+            thresholds=jc.get("thresholds_path"),
+            threshold_overrides=jc.get("threshold_overrides") or {},
+            device=cfg["model"]["device"],
+        )
+    elif judge_type == "xrv":
+        judge = Judge(
+            model_name=jc["model_name"],
+            use_op_threshs=jc["use_op_threshs"],
+            threshold_overrides=jc.get("threshold_overrides") or {},
+            device=cfg["model"]["device"],
+        )
+    else:
+        raise ValueError(f"judge.type phải là 'trtr' hoặc 'xrv', nhận {judge_type!r}")
 
     y_true, y_prob, y_pred, gt_no_finding = [], [], [], []
     detail_rows = []
@@ -91,7 +106,10 @@ def main():
 
     report = {
         "n_images": len(rows),
+        "judge_type": judge_type,
+        "judge_id": jc.get("checkpoint") if judge_type == "trtr" else jc.get("model_name"),
         "target_labels": target_labels,
+        "thresholds": {n: float(t) for n, t in zip(judge.pathologies, judge.thresholds)},
         "hamming_accuracy": hamming_accuracy(y_true, y_pred),
         "exact_match_ratio": exact_match_ratio(y_true, y_pred),
         "per_label": per_label_metrics(y_true, y_prob, y_pred, target_labels),
@@ -119,7 +137,11 @@ def main():
         writer.writeheader()
         writer.writerows(detail_rows)
 
-    print(f"[CAS] Hamming accuracy : {report['hamming_accuracy']:.4f}")
+    baseline = float((y_true == 0).mean())      # bộ dự đoán "toàn âm tính"
+    report["hamming_baseline_all_negative"] = baseline
+    print(f"[CAS] judge = {judge_type} ({report['judge_id']})")
+    print(f"[CAS] Hamming accuracy : {report['hamming_accuracy']:.4f} "
+          f"(vạch chuẩn toàn-âm-tính = {baseline:.4f})")
     print(f"[CAS] Exact match ratio: {report['exact_match_ratio']:.4f}")
     print(f"[CAS] No-finding acc.  : {report['no_finding']['accuracy']:.4f}")
     for lbl, m in report["per_label"].items():

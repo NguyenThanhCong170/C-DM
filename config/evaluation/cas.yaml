@@ -38,9 +38,23 @@ generation:
   metadata_filename: "metadata.csv"
 
 judge:
-  model_name: "densenet121-res224-nih"   
-  use_op_threshs: true                   
-  threshold_overrides: {}                
+  # "trtr" = classifier 5 lớp của chính dự án (khuyến nghị — khớp đúng không gian nhãn)
+  # "xrv"  = torchxrayvision, giám khảo ngoài, độc lập với dữ liệu train
+  type: "trtr"
+
+  # --- khi type: "trtr" ---
+  checkpoint: "./out/eval/trtr_tstr/checkpoints/trtr_seed42.pt"
+  img_size: 512
+  # Ngưỡng hiệu chỉnh trên tập val THẬT. Sinh ra bằng:
+  #   python -m evaluation.cas.judge_trtr --calibrate
+  # Thiếu file này thì dùng 0.5 cho mọi nhãn (thường quá cao với nhãn thưa).
+  thresholds_path: "./out/eval/trtr_tstr/checkpoints/thresholds.json"
+
+  # --- khi type: "xrv" ---
+  model_name: "densenet121-res224-all"
+  use_op_threshs: true
+
+  threshold_overrides: {}
 
 evaluation:
   results_dir: "reports/cas"
