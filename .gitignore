@@ -10,7 +10,6 @@ ckpt/
 
 # Dữ liệu train
 data/
-out/
 
 # Gradio
 .gradio/
