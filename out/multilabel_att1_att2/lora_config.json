@@ -1,0 +1,11 @@
+{
+  "rank": 64,
+  "alpha": 64,
+  "target_modules": [
+    "to_q",
+    "to_k",
+    "to_v",
+    "to_out.0"
+  ],
+  "dropout": 0.0
+}
