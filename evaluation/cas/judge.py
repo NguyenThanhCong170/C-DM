@@ -21,10 +21,23 @@ class Judge:
         # Ngưỡng dương tính do tác giả TorchXRayVision hiệu chỉnh sẵn (op_threshs).
         # Đây là ngưỡng calibrate trên ẢNH THẬT — cần lưu ý domain shift khi áp
         # dụng cho ảnh synthetic (xem cas/README.md phần "Giới hạn của CAS").
-        if use_op_threshs and getattr(self.model, "op_threshs", None) is not None:
-            self.thresholds = np.array(self.model.op_threshs)
+        op = getattr(self.model, "op_threshs", None)
+        if use_op_threshs and op is not None:
+            # op_threshs là BUFFER đăng ký -> .to(device) đẩy nó lên GPU theo model,
+            # nên phải .cpu() trước khi sang numpy.
+            if torch.is_tensor(op):
+                op = op.detach().cpu().numpy()
+            self.thresholds = np.asarray(op, dtype=np.float64)
         else:
-            self.thresholds = np.full(len(self.pathologies), 0.5)
+            self.thresholds = np.full(len(self.pathologies), 0.5, dtype=np.float64)
+
+        # Model chỉ hiệu chỉnh ngưỡng cho các nhãn mà bộ dữ liệu của nó có.
+        # Nhãn thiếu -> threshold = NaN -> `prob >= NaN` luôn False, tức KHÔNG BAO GIỜ
+        # dương tính. Báo ra để khỏi lặng lẽ mất nhãn khi gộp về 5 chiều.
+        nan_labels = [n for n, t in zip(self.pathologies, self.thresholds) if np.isnan(t)]
+        if nan_labels:
+            print(f"[judge] {model_name}: {len(nan_labels)} nhãn không có ngưỡng hiệu chỉnh "
+                  f"(luôn âm tính): {nan_labels}")
 
         threshold_overrides = threshold_overrides or {}
         for label, value in threshold_overrides.items():
